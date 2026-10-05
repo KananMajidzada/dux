@@ -1,0 +1,535 @@
+; analog.tal - a clock face with hands, on the real clock
+;
+;   ./duxasm -o roms/analog.rom asm/analog.tal
+;   ./duxsdl roms/analog.rom
+;
+; Twelve marks, three hands and a middle, at 160, 100. The Datetime device is
+; read-only, so there is nothing to set and nothing to remember to set: the hands
+; go where the time says and nowhere else.
+;
+; The only hard part of a clock face is the point each hand points at, and there
+; is no sine anywhere in this. Two tables of directions do the whole of it:
+;
+;   @d5   72 directions five degrees apart - the hour hand, which moves a fifth
+;         of the way between one hour and the next rather than jumping
+;   @d6   60 directions six degrees apart - the minute hand, the second hand and
+;         the marks, which are every fifth entry of it
+;
+; Each entry is two bytes holding an offset *biased by 128*, so straight up is
+; 128, a quarter turn either way is about 1 or about 255, and nothing in the
+; tables is ever negative. Recovering the offset for a length r is
+;
+;   offset = byte * r / 128 - r
+;
+; one multiply and one divide, on values that are never negative - so the
+; arithmetic is unsigned throughout and there is no sign anywhere to get wrong.
+; Straight up comes out 128r/128 - r, which is zero; a quarter turn comes out
+; 255r/128 - r, which is 0.99r. The error is under half a pixel at every angle.
+;
+; Zero page: $22 the colour, $24 a scratch short, $26 the outer radius, $2c the
+; table, $2e the index, $32 the inner radius, $34 one biased byte, $36 a product;
+; $38 and $3a the inner end, $5e and $60 the outer end; $3c to $4c are the line
+; walker's own, $50 its scratch; $58 the hour, $5a the minute, $5c the second.
+; $7e and $7f belong to @widen.
+INCLUDE "common.tal"
+
+@CLK.hour    = $c6
+@CLK.minute  = $c7
+@CLK.second  = $c8
+
+@draw
+        JSR2 @clear
+
+        ; The twelve marks: a dash at every fifth direction in @d6, from 78 out
+        ; to 88, in grey 153.
+        LIT $02
+        STA $22
+        LIT2 @d6
+        STA2 $2c
+        LIT $4e                ; 78
+        STA $32
+        LIT $58                ; 88
+        STA $26
+        LIT2 $0000
+        STA2 $2e
+@mark
+        JSR2 @hand
+        LDA2 $2e
+        LIT2 $0005
+        ADD2
+        STA2 $2e
+        LDA2 $2e
+        LIT2 $0037              ; 55, so stop past it - which is what leaves the
+        GTH2                    ; last mark at index 55 drawn and the exit on 60
+        JNZ @marks-done
+        JMP @mark
+@marks-done
+
+        ; The Datetime device, read three times a frame. DEI hands back one byte,
+        ; and a byte store is three instructions with the address on top of it, so
+        ; these three lines are already balanced.
+        DEI $CLK.hour
+        STA $58
+        DEI $CLK.minute
+        STA $5a
+        DEI $CLK.second
+        STA $5c
+
+        ; The second hand: direction s, out to 76, in grey 85.
+        LIT $03
+        STA $22
+        LIT2 @d6
+        STA2 $2c
+        LDZ $5c
+        JSR2 @widen
+        STA2 $2e
+        LIT $00
+        STA $32
+        LIT $4c                ; 76
+        STA $26
+        JSR2 @hand
+
+        ; The minute hand: direction m, out to 66, in grey 153.
+        LIT $02
+        STA $22
+        LIT2 @d6
+        STA2 $2c
+        LDZ $5a
+        JSR2 @widen
+        STA2 $2e
+        LIT $00
+        STA $32
+        LIT $42                ; 66
+        STA $26
+        JSR2 @hand
+
+        ; The hour hand: direction (h mod 12) * 6 + m / 12 in @d5, out to 46, in
+        ; white. The clock counts to twenty-three, so the modulus is two
+        ; subtractions and not one: subtracting once leaves twelve for the
+        ; thirteenth hour, and twelve times six is seventy-two, which is one past
+        ; the end of a seventy-two-entry table.
+        LIT $01
+        STA $22
+        LIT2 @d5
+        STA2 $2c
+        LDZ $58
+        JSR2 @widen
+        STA2 $2e
+        LDA2 $2e
+        LIT2 $0017              ; 23
+        GTH2
+        JNZ @h-one
+        JMP @h-twice
+@h-one
+        LDA2 $2e
+        LIT2 $000c
+        SUB2
+        STA2 $2e
+@h-twice
+        LDA2 $2e
+        LIT2 $000b              ; 11
+        GTH2
+        JNZ @h-two
+        JMP @h-scaled
+@h-two
+        LDA2 $2e
+        LIT2 $000c
+        SUB2
+        STA2 $2e
+@h-scaled
+        LDA2 $2e
+        LIT2 $0006
+        MUL2                    ; six five-degree steps to the hour
+        STA2 $2e
+        LDZ $5a
+        JSR2 @widen
+        LIT2 $000a              ; 10, and not 12: a minute is half a degree and
+        DIV2                    ; an entry is five, so ten minutes to a step. Six
+        STA2 $24                ; of those to the hour, an hour being thirty
+                                ; degrees. At most 11 * 6 + 5 = 71, which is the
+                                ; last entry of @d5, so the index cannot run off
+                                ; the end.
+                                ;
+                                ; Scaling this count by five looks right too, since
+                                ; a twelfth of an hour *is* five degrees, but @d5
+                                ; is already a five-degree table: it points the
+                                ; hand at five times the time - 3:14 reads as
+                                ; 3:50 - and from ten past the hour it walks off
+                                ; the end of @d5 into @d6's first bytes. Twelve
+                                ; only looks soft by comparison: the hand then
+                                ; jumps in five-minute steps and sits four
+                                ; degrees short at twenty to.
+        LDA2 $2e
+        LDA2 $24
+        ADD2
+        STA2 $2e
+        LIT $00
+        STA $32
+        LIT $2e                ; 46
+        STA $26
+        JSR2 @hand
+
+        ; The middle last, so it lies on top of all three hands.
+        JSR2 @centre
+        JMP2r2
+
+; A three-by-three block in the middle, in white.
+@centre
+        LIT $01
+        STA $22
+        LIT2 $009f              ; 159, 99: the block's top left, so that the block
+        STA2 $3c                ; lands symmetrically on 160, 100
+        LIT2 $0063
+        STA2 $3e
+        LIT $00
+        STA $2e
+@c-row
+        LDA2 $3c
+        STA2 $40
+        LIT $00
+        STA $36
+@c-col
+        LDA2 $40
+        LDA2 $3e
+        LDZ $22
+        JSR2 @plot
+        LDA2 $40
+        LIT2 $0001
+        ADD2
+        STA2 $40
+        LDZ $36
+        LIT $01
+        ADD
+        STA $36
+        LDZ $36
+        LIT $02                ; three columns, so stop past two
+        GTH
+        JNZ @c-col-next
+        JMP @c-col
+@c-col-next
+        LDA2 $3e
+        LIT2 $0001
+        ADD2
+        STA2 $3e
+        LDZ $2e
+        LIT $01
+        ADD
+        STA $2e
+        LDZ $2e
+        LIT $02
+        GTH
+        JNZ @c-done
+        JMP @c-row
+@c-done
+        JMP2r2
+
+; Every table here is two bytes to the entry - an x byte and a y byte - so the
+; index in $2e counts entries and has to be doubled before it can address
+; anything. Getting that wrong is not an out-of-range read and not a crash: it
+; reads a perfectly good byte of the table, just the wrong one, so every hand
+; comes out one entry behind, the face still looks like a clock, and the only
+; symptom is that the time is wrong. Hence base + index + index, twice over.
+;
+; Draws one ray of the face: the line from the inner radius $32 to the outer
+; radius $26, along the direction the table at $2c gives for the index in $2e.
+;
+; A hand is this with the inner radius at zero, which puts one end on the middle;
+; a mark is this with the two radii ten apart, which puts one dash at the rim.
+;
+; Stack: nothing. Tail-calls @line, so the ray is the last thing @hand does.
+@hand
+        LDA $32                ; the inner radius, into @offset's own cell
+        STA $68                ; first. $32 is the caller's to keep: if @hand wrote
+        LDA2 $2c                ; the outer radius over it, the next call would
+        LDA2 $2e                ; further on
+        ADD2                    ; base + index ...
+        LDA2 $2e                ; ... and the index again, because an entry is
+        ADD2                    ; two bytes and there is no DUP2 to reuse it with
+        LDA
+        JSR2 @widen
+        STA2 $34
+        JSR2 @offset
+        STA2 $38
+        LDA2 $2c
+        LDA2 $2e
+        ADD2
+        LDA2 $2e
+        ADD2
+        LIT2 $0001
+        ADD2
+        LDA
+        JSR2 @widen
+        STA2 $34
+        JSR2 @offset
+        STA2 $3a
+
+        LDA $26                ; the outer end, at the other radius
+        STA $68
+        LDA2 $2c
+        LDA2 $2e
+        ADD2
+        LDA2 $2e
+        ADD2
+        LDA
+        JSR2 @widen
+        STA2 $34
+        JSR2 @offset
+        STA2 $5e
+        LDA2 $2c
+        LDA2 $2e
+        ADD2
+        LDA2 $2e
+        ADD2
+        LIT2 $0001
+        ADD2
+        LDA
+        JSR2 @widen
+        STA2 $34
+        JSR2 @offset
+        STA2 $60
+
+        LIT2 $00a0              ; 160, 100: the middle of a 320 by 200 screen
+        LDA2 $38
+        ADD2
+        STA2 $3c
+        LIT2 $0064
+        LDA2 $3a
+        ADD2
+        STA2 $3e
+        LIT2 $00a0
+        LDA2 $5e
+        ADD2
+        STA2 $40
+        LIT2 $0064
+        LDA2 $60
+        ADD2
+        STA2 $42
+        JMP2 @line
+
+; Stack: nothing. The biased byte in $34, at the radius in $68. Leaves the offset
+; as byte * r / 128 - r.
+;
+; $68 rather than one of the caller's cells on purpose: @hand needs the inner and
+; the outer radius in turn, and writing the outer one over the cell the caller set
+; meant the *second* mark of twelve was drawn with both ends on the same radius -
+; eleven of the twelve marks came out one pixel long, and the face had a rim of
+; dots on it instead of twelve dashes.
+;
+; Both radii are bytes, and that matters too: a short keeps its high half at the
+; lower address, so 78 stored as a short is $00 at the cell and $4e at the next
+; one, and the byte read that follows finds zero every single time.
+;
+; DIV2 divides the first thing pushed by the second and throws the remainder
+; away, which is measured, not assumed: 1000 DIV2 128 is seven.
+@offset
+        LDA2 $34
+        LDZ $68
+        JSR2 @widen              ; the radius is a byte; LDZ2 would hand @widen
+        MUL2                     ; a short and it would read the wrong half
+        STA2 $36
+        LDA2 $36
+        LIT2 $0080
+        DIV2
+        STA2 $36
+        LDA2 $36
+        LDZ $68
+        JSR2 @widen
+        SUB2
+        JMP2r2
+
+; Stack: nothing. The line from ($3c, $3e) to ($40, $42).
+;
+; Bresenham, with the error term positive the whole way. That matters here more
+; than it usually would, because every comparison on this machine is unsigned.
+; The textbook form keeps dy negative and starts the error at dx + dy, which is
+; already negative on the first step; from there "err < dy" and "err > dx" both
+; answer wrongly, neither end of the line ever moves, and it runs until the step
+; budget runs out - a hundred and seventy-eight million pixels on one line.
+;
+; So the error starts at half the long axis and is compared against the short axis
+; *before* it is reduced, which keeps every value in the loop between zero and the
+; long axis without ever going under for even one instruction.
+;
+; And there are two loops rather than one because the loop picks its own axis.
+; Swapping the ends, or exchanging the roles of x and y, draws the transpose of
+; the line wanted: a vertical line came out as its own diagonal, and a transposed
+; clock hand points somewhere else entirely.
+@line
+        LDA2 $40
+        LDA2 $3c
+        SUB2
+        JSR2 @abs
+        STA2 $44                ; along x
+        LDA2 $42
+        LDA2 $3e
+        SUB2
+        JSR2 @abs
+        STA2 $48                ; along y
+        LIT2 $0001
+        STA2 $46                ; which way along x: +1
+        LDA2 $3c
+        LDA2 $40
+        GTH2
+        JNZ @lx-neg
+        JMP @lx-go
+@lx-neg
+        LIT2 $0000              ; @widen cannot make -1 out of anything - a byte
+        LDA2 $46                ; of $ff widens to 255, not to minus one - so the
+        SUB2                    ; sign is applied here, where SUB2 wants it: zero
+        STA2 $46                ; minus one is minus one, both shorts
+@lx-go
+        LIT2 $0001
+        STA2 $4a
+        LDA2 $3e
+        LDA2 $42
+        GTH2
+        JNZ @ly-neg
+        JMP @ly-go
+@ly-neg
+        LIT2 $0000
+        LDA2 $4a
+        SUB2
+        STA2 $4a
+@ly-go
+        LDA2 $48                ; is y the longer axis? GTH is strict, so a line
+        LDA2 $44                ; of exactly equal length walks x
+        GTH2
+        JNZ @walk-y
+
+        LDA2 $44
+        LIT2 $0002
+        DIV2
+        STA2 $4c
+@lx-plot
+        LDA2 $3c
+        LDA2 $3e
+        LDZ $22
+        JSR2 @plot
+        LDA2 $3c
+        LDA2 $40
+        EQU2
+        JNZ @l-done
+        ; Is the error still at least dy? JNZ goes when the comparison is *true*
+        ; and LTH2 sets its flag when true, so the test cannot be used to skip
+        ; its own result: branching on it the obvious way round skips the step
+        ; exactly when the step is wanted, and every line comes out as a staircase
+        ; running off at forty-five degrees. So the step is the taken branch and
+        ; the fall-through is the skip.
+        LDA2 $4c
+        LDA2 $48
+        LTH2
+        JNZ @lx-astep
+        JMP @lx-noy
+@lx-astep
+        LDA2 $4c                ; err was under dy: take dy off and give dx back
+        LDA2 $48                ; in one go, which is the same as subtracting dy,
+        SUB2                    ; noticing it went under zero, and adding dx - but
+        LDA2 $44                ; without ever being under zero for an instant
+        ADD2
+        STA2 $4c
+        LDA2 $3e
+        LDA2 $4a
+        ADD2
+        STA2 $3e
+        JMP @lx-step
+@lx-noy
+        LDA2 $4c                ; err was already at dy or over, so it just loses
+        LDA2 $48                ; dy. This step is the one that is easy to forget:
+        SUB2                    ; leave the error alone here and it never changes
+        STA2 $4c                ; again, so the short axis moves once and stops,
+                                ; and every diagonal comes out as a staircase
+                                ; that falls a few pixels short of its far end
+@lx-step
+        LDA2 $3c
+        LDA2 $46
+        ADD2
+        STA2 $3c
+        JMP @lx-plot
+
+@walk-y
+        LDA2 $48
+        LIT2 $0002
+        DIV2
+        STA2 $4c
+@ly-plot
+        LDA2 $3c
+        LDA2 $3e
+        LDZ $22
+        JSR2 @plot
+        LDA2 $3e
+        LDA2 $42
+        EQU2
+        JNZ @l-done
+        LDA2 $4c                ; the same question the other way round, and the
+        LDA2 $44                ; same two cases: under dx, lose dx and gain dy
+        LTH2                    ; and step x; over dx, just lose dx. See @lx-noy
+        JNZ @ly-astep           ; for what happens when that second case is
+        JMP @ly-nox             ; left out - it is the whole bug
+@ly-astep
+        LDA2 $4c
+        LDA2 $44
+        SUB2
+        LDA2 $48
+        ADD2
+        STA2 $4c
+        LDA2 $3c
+        LDA2 $46
+        ADD2
+        STA2 $3c
+        JMP @ly-step
+@ly-nox
+        LDA2 $4c
+        LDA2 $44
+        SUB2
+        STA2 $4c
+@ly-step
+        LDA2 $3e
+        LDA2 $4a
+        ADD2
+        STA2 $3e
+        JMP @ly-plot
+
+@l-done
+        JMP2r2
+
+; Stack: a short. Leaves its absolute value.
+@abs
+        STA2 $50
+        LDA2 $50
+        LIT2 $8000
+        GTH2                    ; a short with the top bit set is negative
+        JNZ @abs-neg
+        JMP @abs-done
+@abs-neg
+        LIT2 $0000
+        LDA2 $50
+        SUB2
+        STA2 $50
+@abs-done
+        LDA2 $50
+        JMP2r2
+
+; Two tables of biased directions, as described at the top.
+;
+; @d5 - 72 directions, five degrees apart.
+@d5
+        DB 128, 1, 139, 1, 150, 3, 161, 5, 171, 9, 182, 13, 191, 18, 201, 24
+        DB 210, 31, 218, 38, 225, 46, 232, 55, 238, 64, 243, 74, 247, 85, 251, 95
+        DB 253, 106, 255, 117, 255, 128, 255, 139, 253, 150, 251, 161, 247, 171, 243, 182
+        DB 238, 191, 232, 201, 225, 210, 218, 218, 210, 225, 201, 232, 191, 238, 182, 243
+        DB 171, 247, 161, 251, 150, 253, 139, 255, 128, 255, 117, 255, 106, 253, 95, 251
+        DB 85, 247, 74, 243, 64, 238, 55, 232, 46, 225, 38, 218, 31, 210, 24, 201
+        DB 18, 192, 13, 182, 9, 171, 5, 161, 3, 150, 1, 139, 1, 128, 1, 117
+        DB 3, 106, 5, 95, 9, 85, 13, 74, 18, 64, 24, 55, 31, 46, 38, 38
+        DB 46, 31, 55, 24, 64, 18, 74, 13, 85, 9, 95, 5, 106, 3, 117, 1
+;
+; @d6 - 60 directions, six degrees apart.
+@d6
+        DB 128, 1, 141, 2, 154, 4, 167, 7, 180, 12, 191, 18, 203, 25, 213, 34
+        DB 222, 43, 231, 53, 238, 64, 244, 76, 249, 89, 252, 102, 254, 115, 255, 128
+        DB 254, 141, 252, 154, 249, 167, 244, 180, 238, 191, 231, 203, 222, 213, 213, 222
+        DB 203, 231, 191, 238, 180, 244, 167, 249, 154, 252, 141, 254, 128, 255, 115, 254
+        DB 102, 252, 89, 249, 76, 244, 64, 238, 53, 231, 43, 222, 34, 213, 25, 203
+        DB 18, 192, 12, 180, 7, 167, 4, 154, 2, 141, 1, 128, 2, 115, 4, 102
+        DB 7, 89, 12, 76, 18, 64, 25, 53, 34, 43, 43, 34, 53, 25, 64, 18
+        DB 76, 12, 89, 7, 102, 4, 115, 2

@@ -1,0 +1,70 @@
+; grid.tal - a lattice, sixteen pixels apart.
+;
+;   ./duxasm -o roms/grid.rom asm/grid.tal
+;   ./duxsdl roms/grid.rom
+;
+; Twenty vertical lines and thirteen horizontal ones, in two colours so you can
+; see which way they cross. The test is a mask rather than a division: i is a
+; multiple of sixteen exactly when i AND $0f is zero, and AND costs one
+; instruction where a division would cost a widen, a literal and a divide.
+;
+; Both loops count in shorts. A byte runs out at 255 and the screen is 320 wide,
+; so the obvious byte counter reaches the end of the screen at 256 and quietly
+; draws a square instead of a rectangle.
+
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        LIT2 $0000
+        STA2 $ZP.sj
+@row
+        LIT2 $0000
+        STA2 $ZP.si
+@col
+        ; A column that starts on the lattice is the first colour; otherwise a
+        ; row that does is the second; otherwise there is nothing here.
+        LDA2 $ZP.si
+        LIT2 $000f
+        AND2
+        JNZ @grid-row
+        LIT $01
+        JMP @grid-go
+@grid-row
+        LDA2 $ZP.sj
+        LIT2 $000f
+        AND2
+        JNZ @col-end
+        LIT $02
+@grid-go
+        STA $ZP.t
+        LDA2 $ZP.si
+        STA2 $ZP.rx
+        LDA2 $ZP.sj
+        STA2 $ZP.ry
+        LDZ2 $ZP.rx
+        LDZ2 $ZP.ry
+        LDZ $ZP.t
+        JSR2 @plot
+@col-end
+        LDA2 $ZP.si
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.si
+        LDA2 $ZP.si
+        LIT2 $0140
+        GTH2
+        JNZ @col-end2
+        JMP @col
+@col-end2
+        LDA2 $ZP.sj
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.sj
+        LDA2 $ZP.sj
+        LIT2 $00c8
+        GTH2
+        JNZ @row-end
+        JMP @row
+@row-end
+        JMP2r2

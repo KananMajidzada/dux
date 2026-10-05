@@ -1,0 +1,129 @@
+; spiral.tal - a square spiral out of the middle
+;
+;   ./duxasm -o roms/spiral.rom asm/spiral.tal
+;   ./duxsdl roms/spiral.rom
+;
+; One step right, one down, two left, two up, three right, and so on: four
+; hundred legs, each a different colour from the last three, which is thirty-nine
+; thousand nine hundred and ninety-nine pixels.
+;
+;   13467 crimson, 13332 yellow, 13200 blue
+;
+; Nothing about that needs arithmetic. The leg length is a counter that grows on
+; every other leg, and the direction is turned by hand:
+;
+;   a quarter turn clockwise is (dx, dy) becoming (-dy, dx)
+;
+; which is the whole of the geometry. The screen edge is not tested for, because
+; the pixel port drops anything outside it, and by leg four hundred the spiral is
+; wider than the screen in x and taller than it in y.
+;
+; Zero page: $22 y, $24 x, $26 the direction's x, $28 its y, $2a the leg length,
+; $2c the legs left, $2e the steps left in this leg, $30 scratch for the turn;
+; $7a counting legs in pairs so that the length grows on every other one, $7b
+; the colour.
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        LIT2 $00a0              ; 160
+        STA2 $24                ; x starts in the middle
+        LIT2 $0064              ; 100
+        STA2 $22                ; y likewise
+        LIT2 $0001
+        STA2 $26                ; and pointing east
+        LIT2 $0000
+        STA2 $28
+        LIT2 $0001
+        STA2 $2a                ; the first leg is one step
+        LIT2 $0190              ; 400 legs
+        STA2 $2c
+        LIT $00
+        STA $7a
+        LIT $01
+        STA $7b                 ; crimson to begin with
+
+@leg
+        LDA2 $2a
+        STA2 $2e
+@step
+        LDA2 $24
+        LDA2 $26
+        ADD2
+        STA2 $24
+        LDA2 $22
+        LDA2 $28
+        ADD2
+        STA2 $22
+        LDA2 $24
+        LDA2 $22
+        LDZ $7b
+        JSR2 @plot              ; the colour goes on last: @plot takes colour,
+                                ; y, x off the top
+        LDA2 $2e
+        LIT2 $0001
+        SUB2
+        STA2 $2e
+        LDA2 $2e
+        LIT2 $0000
+        NEQ2
+        JNZ @step
+
+        JSR2 @turn
+        JSR2 @next-colour
+        LDA2 $2c
+        LIT2 $0001
+        SUB2
+        STA2 $2c
+        LDA2 $2c
+        LIT2 $0000
+        NEQ2
+        JNZ @leg
+        JMP2r2
+
+; A quarter turn clockwise, and a longer leg on every other one.
+@turn
+        LDA2 $26
+        STA2 $30
+        LIT2 $0000
+        LDA2 $28
+        SUB2
+        STA2 $26                ; the new dx is minus the old dy
+        LDA2 $30
+        STA2 $28                ; and the new dy is the old dx
+        LDZ $7a
+        LIT $01
+        ADD
+        STA $7a
+        LDZ $7a
+        LIT $02
+        EQU                     ; EQU sets the flag when the two match and JNZ
+        JNZ @leg-grows          ; takes the branch when it is set, so the branch
+        JMP @turn-done          ; is the growth and the fall-through is the skip
+@leg-grows
+        LIT $00
+        STA $7a
+        LDA2 $2a
+        LIT2 $0001
+        ADD2
+        STA2 $2a
+@turn-done
+        JMP2r2
+
+; Crimson, yellow, blue. GTH is strict, so "past blue" is the branch and falling
+; through is the normal case.
+@next-colour
+        LDZ $7b
+        LIT $01
+        ADD
+        STA $7b
+        LDZ $7b
+        LIT $03
+        GTH
+        JNZ @colour-turn
+        JMP @colour-done
+@colour-turn
+        LIT $01
+        STA $7b
+@colour-done
+        JMP2r2

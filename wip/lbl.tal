@@ -1,0 +1,15 @@
+; lbl.tal - does a label immediately before DB data address that data?
+INCLUDE "../asm/common.tal"
+@ZP.p = $38
+@ZP.v = $2e
+
+@mydata
+        DB 1, 2, 3, 4, 5, 6, 7, 8
+
+@draw
+        JSR2 @clear
+        LIT2 @mydata
+        STA2 $ZP.p
+        LDA2 $ZP.p
+        STA2 $ZP.v
+        JMP2r2

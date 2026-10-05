@@ -1,0 +1,67 @@
+; xmark.tal - an X across the screen
+;
+;   ./duxasm -o roms/xmark.rom asm/xmark.tal
+;   ./duxsdl roms/xmark.rom
+;
+; Two diagonals: one through the origin and one through (319, 0), so the
+; second is si + sj = 319. Both tests were written `EQU2 / JNZ skip`, which
+; is inverted - EQU2 pushes one *on* equality, so JNZ skipped the equal case
+; and the figure never appeared at all. NEQ2 pushes one on inequality, which
+; is what a jump-to-skip wants.
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        LIT2 $0000
+        STA2 $ZP.sj
+@row
+        LIT2 $0000
+        STA2 $ZP.si
+@col
+        ; An X: the main diagonal, or the anti-diagonal through the far corner.
+        ; Two hundred a line, and they cross between two pixels rather than on
+        ; one, so 400.
+        ;
+        ; Each test jumps *to the draw* when it matches, so NEQ2 is what belongs
+        ; there: it pushes one on inequality, and a jump on one is the
+        ; "not this one, try the next" sense. The original `EQU2 / JNZ @try2`
+        ; skipped the equal case instead of taking it, and nothing drew at all.
+
+        LDA2 $ZP.si
+        LDA2 $ZP.sj
+        NEQ2
+        JNZ @try2
+        JMP @xmark-draw
+
+@try2
+        LDA2 $ZP.si
+        LDA2 $ZP.sj
+        ADD2
+        LIT2 $013f
+        NEQ2
+        JNZ @col-end
+@xmark-draw
+        LIT $01
+        JSR2 @plotat
+@col-end
+        LDA2 $ZP.si
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.si
+        LDA2 $ZP.si
+        LIT2 $0140
+        GTH2
+        JNZ @col-end2
+        JMP @col
+@col-end2
+        LDA2 $ZP.sj
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.sj
+        LDA2 $ZP.sj
+        LIT2 $00c8
+        GTH2
+        JNZ @row-end
+        JMP @row
+@row-end
+        JMP2r2

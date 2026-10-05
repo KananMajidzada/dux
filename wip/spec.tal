@@ -1,0 +1,598 @@
+; clock.tal - the time, large.
+;
+;   ./duxasm -o clock.rom asm/clock.tal
+;   ./dux -n 3 -p /tmp/clock.ppm clock.rom
+;   ./duxsdl clock.rom
+;
+; Seven-segment digits, because a font would be more data than the whole
+; program. Each digit is 5 wide and 7 tall:
+;
+;        ---a---
+;        f     b
+;        f     b
+;        ---g---
+;        e     c
+;        e     c
+;        ---d---
+;
+; A horizontal segment is one sprite call: a 5-pixel run. A vertical one is a
+; single pixel with the flip-y bit set, which the Screen device paints on this
+; row and the next, so a 4-pixel column is two calls.
+;
+; The seven segments are unrolled rather than walked through a table. A table
+; walk needs the segment index multiplied, added to a base, and dereferenced at
+; three different offsets, and every one of those is a chance to read the wrong
+; eight bytes. Unrolled it is seven bit tests and seven fixed offsets, which is
+; longer and cannot be subtly wrong.
+;
+; The digits are redrawn every frame rather than only when they change. That is
+; wasteful and much simpler, and erasing one digit is eight sprite calls, so a
+; frame costs about a hundred draws against four thousand for a full-screen
+; clear.
+;
+; Two rules this file lives by, both enforced by the assembler:
+;   Every path out of a vector ends in BRK with both stacks empty.
+;   Every zero page name is used at one width throughout.
+
+; --------------------------------------------------------------- devices
+
+@SCREEN.vector = $20
+@SCREEN.x      = $28
+@SCREEN.y      = $2a
+@SCREEN.addr   = $2c
+@SCREEN.sprite = $2f
+
+@PAL.c0 = $40
+@PAL.c1 = $42
+@PAL.c2 = $44
+@PAL.c3 = $46
+
+@CLK.hour    = $c6
+@CLK.minute  = $c7
+@CLK.second  = $c8
+
+; ------------------------------------------------------------- zero page
+;
+; Bytes first, then shorts on even boundaries with a byte of air between them.
+; The gaps are not tidiness: a short at $1b and another at $1c share a byte, and
+; writing one quietly changes the other.
+; These start at $38, not $10. common.tal owns $10 to $1c for its own scratch -
+; @plot's colour and coordinates, @clear's loop counters and row count - and a
+; second declaration of the same addresses in another file is not a second
+; variable, it is the same variable. clock.tal happens never to call @plot,
+; @clear or @toflag, so nothing overwrites anything today; that is luck, and it
+; fails the day one of those is called, silently, because every write is legal.
+; Nothing below $38 is used by either file, so the whole block moves up intact.
+@ZP.val    = $38      ; the digit being drawn
+@ZP.hour   = $39      ; the time, as three bytes
+@ZP.min    = $3a
+@ZP.dg   = $f0                      ; which digit the sweep is on
+@ZP.mth  = $f1                      ; a short: high half at the base
+@ZP.mtl  = $f2
+@ZP.sec    = $3b
+@ZP.d0     = $3c      ; six digit values, tens before units
+@ZP.d1     = $3d
+@ZP.d2     = $3e
+@ZP.d3     = $3f
+@ZP.d4     = $40
+@ZP.d5     = $41
+@ZP.code   = $42      ; which segments this digit lights
+@ZP.tmp    = $43      ; the value being split
+@ZP.dt     = $44      ; its tens digit
+@ZP.dx     = $46      ; the digit's origin
+@ZP.dy     = $48
+@ZP.sdx    = $4a      ; a segment's offset within the digit
+@ZP.sdy    = $4c
+@ZP.px     = $28      ; and its absolute position
+@ZP.py     = $2a
+@ZP.fl     = $2c      ; zero for one call, one for the two-call vertical kind
+@ZP.frames = $2e      ; frames since reset, for the colon blink
+@ZP.wv     = $30      ; a byte widened to a short, for an address calculation
+@ZP.wvlo   = $31      ; its low half, which is where the byte has to go
+
+; ------------------------------------------------------------------ reset
+
+@reset
+        ; Midnight blue, and a warm amber for the digits so nothing else has to
+        ; compete with them.
+        LIT2 $0000
+        LIT $40
+        JSR2 @put16
+        LIT2 $0000
+        LIT $42
+        JSR2 @put16
+        LIT2 $0000
+        LIT $44
+        JSR2 @put16
+        LIT2 $0fff
+        LIT $46
+        JSR2 @put16
+
+        ; Install the frame vector. The host runs it once per frame, and a
+        ; vector is not called: it has to end in BRK, never JMP2r2.
+        ; The vector goes in through the port, not through STA2: the vector
+        ; lives at $0120 in the device page, and STA2 $20 writes zero page $20.
+        LIT2 @on-frame
+        LIT $20
+        JSR2 @put16
+
+        ; One frame now, so there is something on screen before the first tick.
+        JSR2 @frame-body
+
+        BRK
+
+@on-frame
+        JSR2 @frame-body
+        BRK
+
+; Read the time, work out six digits, and put them on the screen.
+@frame-body
+        LDZ2 $ZP.frames
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.frames
+
+        ; Every digit, ten across, instead of the time. This is the specimen
+        ; sheet: a seven-segment pattern that is wrong shows up here as a
+        ; picture, where in clock.rom it is four pixels buried in a time.
+        JSR2 @erase-all
+        LIT $00
+        STA $ZP.dg
+@sw-loop
+        LDZ $ZP.dg
+        LIT $0a
+        LTH                     ; ten of them
+        JNZ @sw-draw
+        JMP @sw-colon
+@sw-draw
+        LIT2 $001e
+        LDZ $ZP.dg
+        JSR2 @mul10
+        LIT2 $0003
+        MUL2
+        ADD2                     ; x = 30 + digit * 30
+        LDZ $ZP.dg              ; @draw-one takes the digit, not the pattern:
+        JSR2 @draw-one          ; it looks @segcodes up itself
+        LDZ $ZP.dg
+        LIT $01
+        ADD
+        STA $ZP.dg
+        JMP @sw-loop
+@sw-colon
+        JSR2 @draw-colons
+@sw-end
+        JMP2r2
+
+; Stack: a byte. Leaves it times ten as a short.
+;
+; The zero goes in the *high* half, because a short keeps its high byte at the
+; lower address: a one-byte value cannot be widened by storing it at the base.
+@mul10
+        STA $ZP.mtl
+        LIT $00
+        STA $ZP.mth
+        LDZ2 $ZP.mth
+        LIT2 $000a
+        MUL2
+        JMP2r2
+
+; Stack: value. Replaced by two digits, tens then units.
+;
+; The value is stashed rather than left on the stack, because dividing it would
+; consume it and the remainder needs it again. DIV divides the second value by
+; the top of the stack, so the divisor goes on last; SUB is second minus top,
+; which is what a remainder needs once the tens digit is multiplied by ten.
+@pair
+        STA $ZP.tmp
+        LDZ $ZP.tmp
+        LIT $0a
+        DIV
+        STA $ZP.dt
+        LDZ $ZP.dt              ; the tens digit, left for the caller
+        LDZ $ZP.tmp
+        LDZ $ZP.dt
+        LIT $0a
+        MUL
+        SUB
+        JMP2r2
+
+; ---------------------------------------------------------------- drawing
+
+; Erase everything the frame drew before it draws anything: the six digit
+; boxes, and then the two colons. The colons were the ones missed - they are
+; outside every digit box, so before @erase-colon existed they were drawn once
+; and never cleared, and the blink never happened.
+@erase-all
+        LIT2 $006e
+        JSR2 @erase-one
+        LIT2 $007e
+        JSR2 @erase-one
+        LIT2 $0096
+        JSR2 @erase-one
+        LIT2 $00a6
+        JSR2 @erase-one
+        LIT2 $00be
+        JSR2 @erase-one
+        LIT2 $00ce
+        JSR2 @erase-one
+        LIT2 $008c
+        JSR2 @erase-colon
+        LIT2 $00b4
+        JSR2 @erase-colon
+        JMP2r2
+
+; Stack: x. Erases one digit-sized box at y = 90.
+@erase-one
+        STA2 $ZP.dx
+        STA2 $ZP.dy $005a
+        STA2 $ZP.py $0000
+; Eight rows, y = 90 to 97. The test is second-from-top > top, so the count has
+; to go on top of the row number and be one past the last row: GTH2 pushes its
+; flag when $0009 > py. Testing py > 8 instead would stop after a single row,
+; which is what this used to do and left a stale pixel behind from the previous
+; digit's right-hand column.
+; Eight rows, y = 90 to 97, which is every row a digit can reach.
+        ;
+        ; GTH2 tests the *first* value pushed against the second, and this was
+        ; measured rather than read off the opcode table: with the row number
+        ; pushed first and $0007 second the flag is `py > 7`, so the loop exits
+        ; at py = 8 and erases py = 0..7. The constant is therefore one *below*
+        ; the number of rows, not one above - the opposite of what `PU1(b > a)`
+        ; suggests, and of what an earlier version of this got wrong, which
+        ; erased ten rows and so cleared two pixels below every digit.
+        ;
+        ; Testing `py > 8` stops after a single row and leaves a stale pixel from
+        ; the previous digit's right-hand column.
+&er-row
+        LDZ2 $ZP.py
+        LIT2 $0009
+        GTH2
+        JNZ @erase-done
+
+        LDZ2 $ZP.dx
+        LIT $28
+        JSR2 @put16
+        LDZ2 $ZP.dy
+        LDZ2 $ZP.py
+        ADD2
+        LIT $2a
+        JSR2 @put16
+        LIT2 &hmask
+        LIT $2c
+        JSR2 @put16
+        LIT $a0             ; flat, colour 0: this is the erase
+        DEO $SCREEN.sprite
+
+        LDZ2 $ZP.py
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.py
+        JMP &er-row
+@erase-done
+        JMP2r2
+
+; Stack: x, digit value. Both consumed.
+@draw-one
+        STA $ZP.val
+        STA2 $ZP.dx
+        STA2 $ZP.dy $005a
+
+        ; One byte of the pattern is enough: the seven segments fit in seven
+        ; bits, so there is no reason to load a short here.
+        ;
+        ; The digit has to be widened to a short before it can be added to an
+        ; address, and LDZ cannot do that: it leaves one byte on the stack, so
+        ; ADD2 finds a byte and half an address and adds the wrong pair. The
+        ; stack checker cannot see it, because both are legal byte counts and
+        ; it carries no types.
+        ; The zero goes in the *high* half and the value in the low one: a
+        ; short holds its high byte at the lower address, so a one-byte
+        ; variable cannot be widened by storing it at the base.
+        LIT $00
+        STA $ZP.wv
+        LDZ $ZP.val
+        STA $ZP.wvlo
+        LDZ2 $ZP.wv
+        LIT2 &segcodes
+        ADD2
+        LDA
+        STA $ZP.code
+
+        LDZ $ZP.code
+        LIT $01
+        AND
+        JNZ @s-a
+        JMP @t-b
+@s-a
+        LIT2 $0000
+        LIT2 $0000
+        JSR2 @seg-h
+
+@t-b
+        LDZ $ZP.code
+        LIT $02
+        AND
+        JNZ @s-b
+        JMP @t-c
+@s-b
+        LIT2 $0006
+        LIT2 $0002
+        JSR2 @seg-v
+
+@t-c
+        LDZ $ZP.code
+        LIT $04
+        AND
+        JNZ @s-c
+        JMP @t-d
+@s-c
+        LIT2 $0006
+        LIT2 $0006
+        JSR2 @seg-v
+
+@t-d
+        LDZ $ZP.code
+        LIT $08
+        AND
+        JNZ @s-d
+        JMP @t-e
+@s-d
+        LIT2 $0000
+        LIT2 $0008
+        JSR2 @seg-h
+
+@t-e
+        LDZ $ZP.code
+        LIT $10
+        AND
+        JNZ @s-e
+        JMP @t-f
+@s-e
+        LIT2 $0000
+        LIT2 $0006
+        JSR2 @seg-v
+
+@t-f
+        LDZ $ZP.code
+        LIT $20
+        AND
+        JNZ @s-f
+        JMP @t-g
+@s-f
+        LIT2 $0000
+        LIT2 $0002
+        JSR2 @seg-v
+
+@t-g
+        LDZ $ZP.code
+        LIT $40
+        AND
+        JNZ @s-g
+        JMP2r2
+@s-g
+        LIT2 $0000
+        LIT2 $0004
+        JSR2 @seg-h
+        JMP2r2
+
+; Stack: dx, dy. One 5-pixel horizontal bar.
+;
+; The kind is stored with STZ, not STA2, and that is not a style choice. A short
+; holds its high byte at the *lower* address, so `STA2 $ZP.fl $0001` leaves the
+; one in the high half at $2d and a zero in the low half at $2c. Loading it back
+; with LDZ $ZP.fl therefore reads a zero and every vertical segment came out as a
+; horizontal bar: a 2 looked like a 2 with a tail, which is exactly the symptom
+; the comment on @draw-seg was written about. The flag is one byte, so it is
+; stored and loaded as one byte.
+@seg-h
+        STA2 $ZP.sdy
+        STA2 $ZP.sdx
+        STZ $ZP.fl $0000
+        JSR2 @draw-seg
+        JMP2r2
+
+; Stack: dx, dy. One 4-pixel vertical column, which is two calls.
+@seg-v
+        STA2 $ZP.sdy
+        STA2 $ZP.sdx
+        STZ $ZP.fl $0001
+        JSR2 @draw-seg
+        JMP2r2
+
+; The digit's origin plus the segment's offset, then the sprite calls.
+;
+; Which mask goes down first depends on the kind, and getting that backwards is
+; invisible in the disassembly and obvious on the screen: a version that always
+; drew the horizontal run and then added the column drew a spurious five-pixel
+; bar across every vertical segment, so a 2 came out looking like a 2 with a
+; tail. The kind is in ZP.fl, set by @seg-h and @seg-v.
+@draw-seg
+        LDZ2 $ZP.dx
+        LDZ2 $ZP.sdx
+        ADD2
+        STA2 $ZP.px
+        LDZ2 $ZP.dy
+        LDZ2 $ZP.sdy
+        ADD2
+        STA2 $ZP.py
+
+        LDZ $ZP.fl
+        JNZ @ds-vert
+
+        ; A horizontal bar is one eight-pixel run and one call.
+        ;
+        ; $23 is a two-byte sprite without flip-y, so it lays one row down and
+        ; that was the other half of the thin look: an eight-wide bar one row
+        ; tall standing next to a column two pixels wide reads as a scratch. The
+        ; bar wants the same thickness as the column, which is what $33's flip-y
+        ; bit gives - two rows from the one call. The digit then fills all eight
+        ; rows instead of six, and 2 and 5 in particular gain the four rows of
+        ; bar their shape depends on.
+        JSR2 @ds-set
+        LIT2 &hmask
+        LIT $2c
+        JSR2 @put16
+        LIT $33
+        DEO $SCREEN.sprite
+        JMP2r2
+
+@ds-vert
+        ; A column is two down and two across, which is one sprite call: the
+        ; flip-y bit paints this row and the next. It used to take two calls
+        ; four rows down from here, because a column was four tall; with the
+        ; segments all the same thickness it is two, and the second call landed
+        ; two rows below where it belonged - straight through the bar below it,
+        ; which is where "0 has an extra pixel on the right" came from.
+        JSR2 @ds-set
+        LIT2 &vmask
+        LIT $2c
+        JSR2 @put16
+        LIT $33
+        DEO $SCREEN.sprite
+        JMP2r2
+
+; Point the cursor at the segment's absolute position.
+@ds-set
+        LDZ2 $ZP.px
+        LIT $28
+        JSR2 @put16
+        LDZ2 $ZP.py
+        LIT $2a
+        JSR2 @put16
+        JMP2r2
+
+; The two colons, on for thirty-two frames and off for thirty-two, which is
+; about a second each way. Bit 5 of the frame count is the whole of it: no
+; division, no comparison, and it cannot drift.
+@draw-colons
+        LDZ2 $ZP.frames
+        LIT2 $0020
+        AND2
+        ; AND2 leaves a short, and JNZ reads one byte for its condition, so the
+        ; test has to narrow it first. Comparing for equality with $0020 pushes
+        ; the single byte of flag JNZ wants, and leaves nothing behind.
+        LIT2 $0020
+        EQU2
+        JNZ @colons-off
+        LIT2 $008c
+        JSR2 @colon
+        LIT2 $00b4
+        JSR2 @colon
+        JMP2r2
+@colons-off
+        JMP2r2
+
+; Stack: x. Two two-by-two dots five rows apart, which is a colon.
+;
+; One dot is @dot; the colon is two of them. The erase is the same shape in
+; colour 0, and @erase-all has to call it, because until it did the colons were
+; only ever *drawn* - nothing cleared them - so they stayed lit for good after
+; their first on phase and the blink was invisible.
+@colon
+        STA2 $ZP.px
+        LDZ2 $ZP.px
+        LIT2 $005c
+        JSR2 @dot
+        LDZ2 $ZP.px
+        LIT2 $0061
+        JSR2 @dot
+        JMP2r2
+
+; The same two dots, painted colour 0.
+@erase-colon
+        STA2 $ZP.px
+        LDZ2 $ZP.px
+        LIT2 $005c
+        JSR2 @dot-off
+        LDZ2 $ZP.px
+        LIT2 $0061
+        JSR2 @dot-off
+        JMP2r2
+
+; Stack: x, y. One two-by-two dot in white.
+;
+; $33 here for the same reason as the bar in @draw-seg: the dot is two pixels
+; across, so one pixel down would be a thin dash and two reads as a dot.
+@dot
+        STA2 $ZP.py
+        STA2 $ZP.px
+        JSR2 @ds-set
+        LIT2 &vmask
+        LIT $2c
+        JSR2 @put16
+        LIT $33
+        DEO $SCREEN.sprite
+        JMP2r2
+
+; Stack: x, y. The same dot in colour 0.
+;
+; $b0 and not $a0: both are flat and two bytes long, but $b0 has flip-y set and
+; so clears both rows of the dot. $a0 cleared one and left the other behind,
+; which showed as eight pixels that never went away - two rows of two pixels,
+; for each of the two dots, in each of the two colons.
+@dot-off
+        STA2 $ZP.py
+        STA2 $ZP.px
+        JSR2 @ds-set
+        LIT2 &vmask
+        LIT $2c
+        JSR2 @put16
+        LIT $b0
+        DEO $SCREEN.sprite
+        JMP2r2
+
+; --------------------------------------------------------------- device io
+
+; A device port pair holds its high byte at the base address, so a short going
+; to a device has to come through the bare form with the port off the stack.
+; Stack: value, then port. Both consumed.
+@put16
+        DEO2
+        JMP2r2
+
+; ------------------------------------------------------------------- data
+;
+; Data comes after the code: the assembler emits in source order and the reset
+; vector is fixed at 0x0200.
+
+; Which segments each digit lights, one byte each: bit 0 is the top bar, then
+; clockwise from the top right.
+@segcodes
+        DB $3f          ; 0
+        DB $06          ; 1
+        DB $5b          ; 2
+        DB $4f          ; 3
+        DB $66          ; 4
+        DB $6d          ; 5
+        DB $7d          ; 6
+        DB $07          ; 7
+        DB $7f          ; 8
+        DB $6f          ; 9
+
+; An eight-pixel bar, and a two-pixel column.
+;
+; This used to be $ff, $c0 - five across - with a one-pixel column, and it is why
+; the digits read as a scratch rather than as figures. A byte holds four pixels at
+; two bits each, taken from the top: $ff is four across, $c0 is one, $f0 is two.
+; So the old mask was five wide and its verticals were a single pixel standing
+; against a two-pixel-thick bar, which is too fine to read at this size - and 2 and
+; 5 are the two that suffer, because they lean on their verticals for most of
+; their shape and so have the least to read.
+;
+; Two pixels and eight across is what asm/pong.tal uses, and it is legible. The
+; erase in @erase-one stamps this same mask down the digit's height, so it widens
+; with the bar and still clears the whole box.
+@hmask
+        DB $ff, $ff, $00, $00          ; eight across, two down: a bar has to
+                                     ; span both columns
+
+; Two pixels across, two rows down: @seg-v stamps it twice for four rows.
+@vmask
+        DB $c0, $00, $00, $00          ; two across, two down, and the SECOND
+                                     ; byte zero. The sprite length in $33 says
+                                     ; two bytes, which is eight pixels across, so
+                                     ; $c0,$c0 lights columns 0-1 *and* 4-5 -
+                                     ; every digit grew a phantom column in the
+                                     ; middle, which is the "extra pixel on the
+                                     ; right". One $c0 and one $00 is the single
+                                     ; column it looks like on paper.

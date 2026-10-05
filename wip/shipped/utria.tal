@@ -1,0 +1,51 @@
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        LIT2 $0000
+        STA2 $ZP.sj
+@row
+        LIT2 $0000
+        STA2 $ZP.si
+@col
+        ; The same cut the other way up: lit between the two lines through the
+        ; bottom corners, so the row runs from the column to 319 - column. The
+        ; widths are 320, 318, 316 ... 2 and then nothing, and the even numbers
+        ; to 320 come to 25760.
+        ;
+        ; I predicted 36800 from widths 1, 3, 5 ... which is a triangle standing
+        ; on its head, not this one. Sixth time on this project.
+        LDA2 $ZP.sj
+        LDA2 $ZP.si
+        GTH2
+        JNZ @col-end
+        LIT2 $013f
+        LDA2 $ZP.si
+        SUB2
+        LDA2 $ZP.sj
+        LTH2
+        JNZ @col-end
+        LIT $01
+        JSR2 @plotat
+@col-end
+        LDA2 $ZP.si
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.si
+        LDA2 $ZP.si
+        LIT2 $0140
+        GTH2
+        JNZ @col-end2
+        JMP @col
+@col-end2
+        LDA2 $ZP.sj
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.sj
+        LDA2 $ZP.sj
+        LIT2 $00c8
+        GTH2
+        JNZ @row-end
+        JMP @row
+@row-end
+        JMP2r2

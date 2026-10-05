@@ -1,0 +1,383 @@
+; paint.tal - a drawing program.
+;
+;   ./duxasm -o paint.rom asm/paint.tal
+;   ./duxsdl paint.rom
+;   ./dux -n 3 -p /tmp/paint.ppm paint.rom
+;
+;   hold either mouse button and move        paint
+;   1 2 3 4                                  pick a colour, 1 is the background
+;   c or Escape                              clear
+;
+; The cursor is a single pixel that saves whatever was underneath it and puts it
+; back on the way out, so it can sit on top of the drawing without eating it.
+; That needs a framebuffer read, which is just a load: the framebuffer is
+; ordinary memory at $8000, not a mystery register.
+;
+; One honest limitation: the mouse is polled, so dragging fast leaves a dotted
+; line rather than a solid one. Interpolating between the last position and this
+; one would fix it, at the cost of a line routine and a divide.
+
+; --------------------------------------------------------------- devices
+
+@SCREEN.vector = $20
+@SCREEN.x      = $28
+@SCREEN.y      = $2a
+@SCREEN.addr   = $2c
+@SCREEN.pixel  = $2e
+@SCREEN.sprite = $2f
+
+@PAL.c0 = $40
+@PAL.c1 = $42
+@PAL.c2 = $44
+@PAL.c3 = $46
+
+@CTRL.key = $8c
+
+@MOUSE.state = $92      ; bit 0 left, bit 1 right, bit 2 middle
+@MOUSE.xlo   = $93      ; the mouse pair is the other way round: low byte first
+@MOUSE.xhi   = $94
+@MOUSE.ylo   = $95
+@MOUSE.yhi   = $96
+
+; ------------------------------------------------------------- zero page
+;
+; Bytes first, then shorts on even boundaries with a byte of air between them.
+; A short holds its high byte at the lower address, which is why the mouse's
+; low byte has its own name rather than being read at the base.
+@ZP.c      = $10      ; scratch for one pixel's colour
+@ZP.key    = $11      ; the key this frame
+@ZP.old    = $12      ; and the one before it
+@ZP.last   = $13      ; the last key acted on
+@ZP.btn    = $14      ; the buttons held
+@ZP.col    = $15      ; the colour being painted
+@ZP.have   = $16      ; whether the cursor has been drawn yet
+@ZP.under  = $17      ; what the cursor is covering
+@ZP.got    = $1e      ; scratch for a pixel read, and it must not be @ZP.under:
+                      ; they are both live in the same frame, the cursor's saved
+                      ; colour is read back with @getpixel, and sharing an
+                      ; address silently turns "put this back" into "put back
+                      ; whatever the last pixel read happened to be". That is a
+                      ; cursor that leaves a trail instead of a dot.
+@ZP.shhi   = $18      ; and for a shift count, whose halves need two names
+@ZP.sh     = $19
+@ZP.rx     = $1a      ; @plot and @getpixel coordinates
+@ZP.ry     = $1c
+@ZP.mx     = $20      ; the cursor
+@ZP.mxlo   = $21
+@ZP.my     = $22
+@ZP.mylo   = $23
+@ZP.px     = $24      ; where it was last frame
+@ZP.pxlo   = $25
+@ZP.py     = $26
+@ZP.pylo   = $27
+@ZP.fc     = $28      ; the row counter while clearing
+
+; ------------------------------------------------------------------ reset
+
+@reset
+        ; Four colours that stay apart, because the cursor has to be visible on
+        ; top of every one of them.
+        LIT2 $0000
+        LIT $40
+        JSR2 @put16
+        LIT2 $0fff
+        LIT $42
+        JSR2 @put16
+        LIT2 $0999
+        LIT $44
+        JSR2 @put16
+        LIT2 $0555
+        LIT $46
+        JSR2 @put16
+
+        ; The vector goes in through the port, not through STA2: the vector
+        ; lives at $0120 in the device page, and STA2 $20 writes zero page $20.
+        LIT2 @on-frame
+        LIT $20
+        JSR2 @put16
+        STA $ZP.col $01
+        STA $ZP.have $00
+        JSR2 @clear
+
+        ; The reset vector is not called, so it ends in BRK. JMP2r2 would pop
+        ; a return address off a return stack that is empty here and jump
+        ; wherever it found.
+        BRK
+
+@on-frame
+        JSR2 @read-mouse
+        JSR2 @read-key
+
+        ; Put back whatever the cursor was covering, then draw it again
+        ; somewhere else. Both happen every frame, so the cursor is one pixel
+        ; that borrows the drawing and gives it straight back.
+        LDZ $ZP.have
+        JNZ @on-restore
+        JMP @on-place
+@on-restore
+        LDZ2 $ZP.px
+        LDZ2 $ZP.py
+        LDZ $ZP.under
+        JSR2 @plot
+@on-place
+        LDZ2 $ZP.mx
+        LDZ2 $ZP.my
+        JSR2 @getpixel
+        STA $ZP.under
+
+        LDZ2 $ZP.mx
+        LDZ2 $ZP.my
+        LIT $03
+        JSR2 @plot
+
+        ; Remember where the cursor was. The halves go in one at a time:
+        ; STA2 needs a value *and* an address on the stack, and there is only
+        ; the value here, so the one-operand form would reach two bytes below
+        ; the top of the stack and take whatever was there.
+        ;
+        ; Low half first. A short is stored high byte at the lower address, but
+        ; a short on the stack has its low byte on top, so the first byte to
+        ; come off is the one that belongs in the *second* address. Written the
+        ; other way round it is still in-bounds memory and still assembles, and
+        ; the only symptom is that x reads back multiplied by 256: the restore
+        ; plots at 80,0 instead of 0,80, lands outside the framebuffer, is
+        ; quietly discarded, and the cursor trails behind it forever instead of
+        ; cleaning up after itself.
+        LDZ2 $ZP.mx
+        STA $ZP.pxlo
+        STA $ZP.px
+        LDZ2 $ZP.my
+        STA $ZP.pylo
+        STA $ZP.py
+        LIT $01
+        STA $ZP.have
+
+        ; A held button paints, and then the saved colour is refreshed so the
+        ; cursor lifts off what it just drew instead of restoring over it.
+        ;
+        ; Either button will do. The right one is here because a left drag and
+        ; a left click are the same gesture to a program that only sees a bit,
+        ; and asking for the right lets the left be free for something else
+        ; later without changing what already works.
+        LDZ $ZP.btn
+        LIT $03
+        AND
+        JNZ @on-paint
+        JMP @on-done
+@on-paint
+        LDZ2 $ZP.mx
+        LDZ2 $ZP.my
+        LDZ $ZP.col
+        JSR2 @plot
+        LDZ2 $ZP.mx
+        LDZ2 $ZP.my
+        JSR2 @getpixel
+        STA $ZP.under
+@on-done
+        BRK
+
+; --------------------------------------------------------------- the mouse
+
+; The x and y pairs are low byte first, which is the opposite of every other
+; device on the page, so DEI2 would read them the wrong way round. Two byte
+; reads into a short's two halves are the honest way to ask.
+@read-mouse
+        DEI $MOUSE.xhi
+        STA $ZP.mx
+        DEI $MOUSE.xlo
+        STA $ZP.mxlo
+        DEI $MOUSE.yhi
+        STA $ZP.my
+        DEI $MOUSE.ylo
+        STA $ZP.mylo
+        DEI $MOUSE.state
+        STA $ZP.btn
+        JMP2r2
+
+; A key is acted on only when it changes, because Ctrl/key holds the last key
+; pressed until another arrives and would otherwise fire on every frame.
+;
+; EQU pushes one when the two are equal and there is no jump-if-zero, so the
+; branch has to be the "something changed" one, which means the equal case is
+; the fall-through.
+@read-key
+        DEI $CTRL.key
+        STA $ZP.key
+        LDZ $ZP.last
+        STA $ZP.old        ; what it was last frame
+        LDZ $ZP.key
+        STA $ZP.last       ; and remember this one for the next frame
+        LDZ $ZP.key
+        LDZ $ZP.old
+        EQU
+        JNZ @rk-fire
+        JMP2r2
+
+@rk-fire
+        LDZ $ZP.key
+        LIT $1b              ; Escape
+        EQU
+        JNZ @rk-esc
+        LDZ $ZP.key
+        LIT $63              ; c
+        EQU
+        JNZ @rk-esc
+        LDZ $ZP.key
+        LIT $31              ; 1
+        EQU
+        JNZ @rk-1
+        LDZ $ZP.key
+        LIT $32              ; 2
+        EQU
+        JNZ @rk-2
+        LDZ $ZP.key
+        LIT $33              ; 3
+        EQU
+        JNZ @rk-3
+        LDZ $ZP.key
+        LIT $34              ; 4
+        EQU
+        JNZ @rk-4
+        JMP2r2
+@rk-esc
+        JSR2 @clear
+        JMP2r2
+@rk-1
+        LIT $00
+        STA $ZP.col
+        JMP2r2
+@rk-2
+        LIT $01
+        STA $ZP.col
+        JMP2r2
+@rk-3
+        LIT $02
+        STA $ZP.col
+        JMP2r2
+@rk-4
+        LIT $03
+        STA $ZP.col
+        JMP2r2
+
+; Clear the screen by drawing one wide run per row. A sprite reads up to four
+; bytes, which is 32 pixels, so a row takes ten calls and the screen two
+; hundred rows. Two thousand calls is a lot, and it only happens when asked.
+@clear
+        STA $ZP.have $00
+        STA2 $ZP.fc $0000
+&cl-row
+        LDZ2 $ZP.fc
+        LIT2 $00c8
+        GTH2
+        JNZ @clear-done
+
+        ; The cursor walks down the screen as the row counter walks, and starts
+        ; each row at the left edge.
+        LDA2 $ZP.fc
+        STA2 $ZP.ry
+        STA2 $ZP.rx $0000
+&cl-x
+        LDZ2 $ZP.rx
+        LIT2 $0140
+        GTH2
+        JNZ &cl-next
+
+        LDZ2 $ZP.rx
+        LIT $28
+        JSR2 @put16
+        LDZ2 $ZP.ry
+        LIT $2a
+        JSR2 @put16
+        LIT2 &solid
+        LIT $2c
+        JSR2 @put16
+        LIT $e0             ; flat, colour 0: this is the erase
+        DEO $SCREEN.sprite
+
+        LDZ2 $ZP.rx
+        LIT2 $0020
+        ADD2
+        STA2 $ZP.rx
+        JMP &cl-x
+&cl-next
+        LDA2 $ZP.fc
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.fc
+        JMP &cl-row
+@clear-done
+        JMP2r2
+
+; ---------------------------------------------------------------- drawing
+
+; Stack: x, y, colour. All consumed.
+@plot
+        STA $ZP.c
+        STA2 $ZP.ry
+        STA2 $ZP.rx
+        LDZ2 $ZP.rx
+        LIT $28
+        JSR2 @put16
+        LDZ2 $ZP.ry
+        LIT $2a
+        JSR2 @put16
+        LDZ $ZP.c
+        DEO $SCREEN.pixel
+        JMP2r2
+
+; Stack: x, y. Both consumed. The colour is left behind.
+;
+; The framebuffer is memory, so this is arithmetic and a load: the address is
+; $8000 + (y * 320 + x) / 4, and the pixel is two bits of that byte at a shift
+; of (x & 3) * 2. Two details are easy to get wrong and both are silent:
+; dividing by four is a right shift by *two*, not by four; and SFT takes its
+; count from the top of the stack, so nothing else may sit above it.
+@getpixel
+        STA2 $ZP.ry
+        STA2 $ZP.rx
+
+        LDZ2 $ZP.ry
+        LIT2 $0140          ; 320
+        MUL2
+        LDZ2 $ZP.rx
+        ADD2
+        LIT $02             ; a right shift by two divides by four
+        SFT2
+        LIT2 $8000
+        ADD2
+        LDA                 ; the byte, which holds four pixels
+
+        STA $ZP.got
+        LDZ2 $ZP.rx
+        LIT2 $0003
+        AND2
+        LIT2 $0002
+        MUL2                ; (x & 3) * 2
+        STA $ZP.sh          ; a short is two bytes and STA takes one, so the
+        STA $ZP.shhi        ; high half has to be stored as well
+
+        LDZ $ZP.got
+        LDZ $ZP.sh          ; already the control byte: SFT pops it first
+        SFT
+        LIT $03
+        AND
+        JMP2r2
+
+; --------------------------------------------------------------- device io
+
+; A device port pair holds its high byte at the base address, so a short going
+; to a device comes through the bare form with the port off the stack.
+; Stack: value, then port. Both consumed.
+@put16
+        DEO2
+        JMP2r2
+
+; ------------------------------------------------------------------- data
+;
+; Data comes after the code: the assembler emits in source order and the reset
+; vector is fixed at 0x0200.
+
+; 32 pixels lit, which is the most a sprite reads: bits 5 and 6 both set give
+; a length of four bytes.
+@solid
+        DB $ff, $ff, $ff, $ff

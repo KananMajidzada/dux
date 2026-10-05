@@ -1,0 +1,64 @@
+; band.tal - a diagonal band, sixty-one pixels wide, running down and right
+
+;   ./duxasm -o roms/band.rom asm/band.tal
+;   ./duxsdl roms/band.rom
+;
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        LIT2 $0000
+        STA2 $ZP.sj
+@row
+        LIT2 $0000
+        STA2 $ZP.si
+@col
+        ; A diagonal band sixty pixels either side of the line x = y. Counted by
+        ; *row*: the first sixty rows are 61, 62, ... 120 wide, and the hundred
+        ; and forty after that are 121 all the way. 5430 + 16940 = 22370.
+        ;
+        ; Counting by column gives 31460, which is a different sum over a
+        ; different axis and is the wrong answer - the lit pixels are 22370.
+        LDA2 $ZP.si
+        LDA2 $ZP.sj
+        SUB2
+        STA2 $ZP.ex
+        LDA2 $ZP.ex
+        LIT2 $003c
+        GTH2
+        JNZ @col-end
+        ; Skip where the row is more than sixty below the column, which is
+        ; "row > column + 60". The row has to be the *deeper* operand for that,
+        ; so the sum is built first and the row loaded after it - loaded the
+        ; other way round the comparison is (column + 60) > row and the test
+        ; keeps exactly the band it was meant to reject.
+        LDA2 $ZP.sj
+        LDA2 $ZP.si
+        LIT2 $003c
+        ADD2
+        GTH2
+        JNZ @col-end
+        LIT $01
+        JSR2 @plotat
+@col-end
+        LDA2 $ZP.si
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.si
+        LDA2 $ZP.si
+        LIT2 $0140
+        GTH2
+        JNZ @col-end2
+        JMP @col
+@col-end2
+        LDA2 $ZP.sj
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.sj
+        LDA2 $ZP.sj
+        LIT2 $00c8
+        GTH2
+        JNZ @row-end
+        JMP @row
+@row-end
+        JMP2r2

@@ -1,0 +1,411 @@
+; symbols.tal - a specimen sheet: every glyph this machine draws, big enough to see.
+;
+;   ./duxasm -X -o roms/symbols.rom asm/symbols.tal
+;   ./dux -n 2 -p /tmp/symbols.ppm roms/symbols.rom
+;   ./duxsdl roms/symbols.rom
+;
+; Why this ROM exists
+; -------------------
+; clock.rom draws its digits as seven-segment sprites out of a two-byte mask,
+; and they came out wrong: a column here, a phantom pixel there, and four pixels
+; of a "0" buried inside a time where nobody can see the shape. Every fix was a
+; guess about the sprite port - how many bytes the length field really selects,
+; whether a byte is four pixels, whether flip-y mirrors inside a byte or across
+; the pair - and every guess was wrong in a way a pixel count could not see.
+;
+; So this ROM does not use the sprite port at all. It plots one pixel at a time
+; through @plot, which is the one drawing path in the machine that needs no
+; interpretation of a device byte, and it puts the whole character set on screen
+; at once so a wrong glyph is obvious rather than arguable.
+;
+; A glyph is five wide and seven tall. Seven rows, one byte a row, and the five
+; pixels are the top five bits - bit 7 leftmost. Five pixels will not fit in a
+; nibble and the sprite port counts in nibbles, which is one of several reasons
+; the sprite path is a poor fit for a font.
+;
+; Nothing here is animated. It draws once and holds, because a specimen sheet
+; that moves is a specimen sheet you cannot read.
+;
+; Stack contracts, all checked by the assembler and by tools/netcheck.py:
+;   @glyph   x short, y short, glyph short, colour byte        seven bytes
+;   @digits  x short, y short, value byte, colour byte         six bytes
+;   @letter  x short, y short, index byte, colour byte         six bytes
+;   @row     x short, y short, first index, count, step, col  ten bytes
+
+INCLUDE "../asm/common.tal"
+
+@SCREEN.vector = $20
+@SCREEN.x      = $28
+@SCREEN.y      = $2a
+@SCREEN.pixel  = $2e
+
+@PAL.c0 = $40                      ; black
+@PAL.c1 = $42                      ; white
+@PAL.c2 = $44                      ; grey
+@PAL.c3 = $46                      ; grey
+
+; --------------------------------------------------------------- zero page
+;
+; Private block per routine, and the blocks do not touch. @glyph calls @plot,
+; which is common.tal's and owns $10 to $26, so everything here starts at $80.
+@ZP.gx    = $80                    ; the glyph's top left
+@ZP.gy    = $82
+@ZP.gp    = $84                    ; walking the seven rows
+@ZP.gc    = $86                    ; its colour
+@ZP.grow  = $87                    ; rows left, seven
+@ZP.gr    = $88                    ; the row's five bits
+@ZP.gcol  = $89                    ; which column, five
+@ZP.vx    = $8a                    ; @digits' and @letter's x
+@ZP.vy    = $8c
+@ZP.vv    = $8e
+@ZP.vval  = $9a                    ; the index, kept apart from the colour
+@ZP.vc    = $8f
+@ZP.rx    = $90                    ; @row's walk
+@ZP.ry    = $92
+@ZP.rf    = $94
+@ZP.rn    = $95
+@ZP.rs    = $96
+@ZP.rc    = $97
+
+; ------------------------------------------------------------------ layout
+@R1.Y = $18                       ; 24:  the digits
+@R2.Y = $50                       ; 80:  A to M
+@R3.Y = $88                       ; 136: N to Z
+@R4.Y = $c0                       ; 192: the marks
+@X0   = $14                       ; 20
+@PITCH = $0c                      ; 12: five of glyph and seven of space
+
+@draw
+        JSR2 @clear
+
+        ; The palette: the VALUE is the colour and the PORT is the entry.
+        ; Written the other way round - colour as the port, zero as the value -
+        ; it sets palette[0x40] to black and leaves every entry the drawing code
+        ; actually uses at whatever the loader left there. Every glyph then comes
+        ; out black on black and the ROM reports zero lit pixels with a clean
+        ; stack, which is about as quiet a failure as this machine manages.
+        LIT2 $0000
+        LIT $40
+        JSR2 @put16                 ; 0 black
+        LIT2 $0fff
+        LIT $42
+        JSR2 @put16                 ; 1 white
+        LIT2 $0999
+        LIT $44
+        JSR2 @put16                 ; 2 light grey
+        LIT2 $0555
+        LIT $46
+        JSR2 @put16                 ; 3 dark grey
+
+        ; Ten digits, 0 to 9.
+        ; The five arguments go on the stack, not into cells: @row pops
+        ; colour, step, count, first and y off it, and storing them first
+        ; hands it an empty stack, which the assembler reports as "pops 3
+        ; bytes from a stack 2 deep" some way later and nowhere near here.
+        LIT2 @R1.Y
+        LIT $00
+        LIT $0a
+        LIT $01
+        LIT $01
+        JSR2 @row
+
+        ; Thirteen letters, A to M.
+        ; The five arguments go on the stack, not into cells: @row pops
+        ; colour, step, count, first and y off it, and storing them first
+        ; hands it an empty stack, which the assembler reports as "pops 3
+        ; bytes from a stack 2 deep" some way later and nowhere near here.
+        LIT2 @R2.Y
+        LIT $00
+        LIT $0d
+        LIT $01
+        LIT $01
+        JSR2 @row
+
+        ; Thirteen more, N to Z.
+        ; The five arguments go on the stack, not into cells: @row pops
+        ; colour, step, count, first and y off it, and storing them first
+        ; hands it an empty stack, which the assembler reports as "pops 3
+        ; bytes from a stack 2 deep" some way later and nowhere near here.
+        LIT2 @R3.Y
+        LIT $0d
+        LIT $0d
+        LIT $01
+        LIT $01
+        JSR2 @row
+
+        ; The marks: space, exclamation, hyphen, full stop. Drawn by hand
+        ; rather than through @row, because @row reads its index through @either
+        ; and index zero there is the digit 0, not the space.
+        LIT2 @X0
+        STA2 $ZP.gx
+        LIT2 @R4.Y
+        STA2 $ZP.gy
+        LIT $02
+        STA $ZP.gc
+        LDA2 $ZP.gx
+        LIT2 @PITCH
+        ADD2
+        LDA2 $ZP.gy
+        LIT2 @mtab
+        LIT2 $0000
+        ADD2
+        LDZ $ZP.gc
+        JSR2 @glyph
+        LDA2 $ZP.gx
+        LIT2 @PITCH
+        LIT2 $0001
+        MUL2
+        ADD2
+        LDA2 $ZP.gy
+        LIT2 @mtab
+        LIT2 $0007
+        ADD2
+        LDZ $ZP.gc
+        JSR2 @glyph
+        LDA2 $ZP.gx
+        LIT2 @PITCH
+        LIT2 $0002
+        MUL2
+        ADD2
+        LDA2 $ZP.gy
+        LIT2 @mtab
+        LIT2 $000e
+        ADD2
+        LDZ $ZP.gc
+        JSR2 @glyph
+        LDA2 $ZP.gx
+        LIT2 @PITCH
+        LIT2 $0003
+        MUL2
+        ADD2
+        LDA2 $ZP.gy
+        LIT2 @mtab
+        LIT2 $0015
+        ADD2
+        LDZ $ZP.gc
+        JSR2 @glyph
+
+        JMP2r2
+
+; Stack: y short, first index byte, count byte, step byte, colour byte, and a
+; short x that this routine pushes itself: eight bytes in, ten out, and the
+; header says so because getting that wrong is a silent leak.
+;
+; One routine for all four rows, because four near-identical copies of a loop is
+; four chances to mistype a count, and a mistyped count shows as a missing
+; glyph that reads as "the font has no E" rather than as an arithmetic slip.
+@row
+        STA $ZP.rc
+        STA $ZP.rs
+        STA $ZP.rn
+        STA $ZP.rf
+        STA2 $ZP.ry
+        LIT2 @X0
+        STA2 $ZP.rx
+@row-loop
+        LDA2 $ZP.rx
+        LDA2 $ZP.ry
+        LDZ $ZP.rf                    ; @either takes the index as an argument.
+        LDZ $ZP.rc                    ; Pushing it and then storing it in a cell
+        JSR2 @either                  ; left @either a byte short every glyph
+        LDA2 $ZP.rx
+        LIT2 @PITCH
+        ADD2
+        STA2 $ZP.rx
+        LDZ $ZP.rf
+        LDZ $ZP.rs
+        ADD
+        STA $ZP.rf
+        LDZ $ZP.rn
+        LIT $01
+        SUB
+        DUP
+        STA $ZP.rn
+        JNZ @row-loop
+        JMP2r2
+
+; Stack: x short, y short, index byte, colour byte. Six bytes.
+;
+; Index below 10 is a digit and 10 or above is a letter, so the two tables share
+; one call site and the row walk does not have to know which it is on.
+@either
+        STA $ZP.vc
+        STA $ZP.vv
+        STA2 $ZP.vy
+        STA2 $ZP.vx
+        LDZ $ZP.vv
+        LIT $0a
+        LTH
+        JNZ @e-letter
+        JMP @e-digit
+@e-digit
+        LDA2 $ZP.vx
+        LDA2 $ZP.vy
+        LDZ $ZP.vv
+        LDZ $ZP.vc
+        JMP2 @digits
+@e-letter
+        LDA2 $ZP.vx
+        LDA2 $ZP.vy
+        LDZ $ZP.vv
+        LIT $0a
+        SUB
+        STA $ZP.vv
+        LDA2 $ZP.vx
+        LDA2 $ZP.vy
+        LDZ $ZP.vv
+        LDZ $ZP.vc
+        JMP2 @letter
+
+; Stack: x short, y short, value byte, colour byte. Six bytes.
+;
+; The index is turned into a glyph address here and the rest is @glyph's job.
+; Seven rows a glyph, so the multiply is by seven, not by one: at one the table
+; ran off the end after the third digit and the rest of the row was whatever
+; followed in memory.
+@digits
+        STA $ZP.vv
+        STA $ZP.vval
+        STA2 $ZP.gy
+        STA2 $ZP.gx
+        LDA2 $ZP.gx
+        LDA2 $ZP.gy
+        LIT2 @dtab
+        LDZ $ZP.vval
+        JSR2 @widen                 ; a short, so it can index a short table
+        LIT2 $0007
+        MUL2
+        ADD2
+        LDZ $ZP.vv
+        JMP2 @glyph
+
+; Stack: x short, y short, index byte, colour byte. Six bytes.
+@letter
+        STA $ZP.vv
+        STA $ZP.vval
+        STA2 $ZP.gy
+        STA2 $ZP.gx
+        LDA2 $ZP.gx
+        LDA2 $ZP.gy
+        LIT2 @atab
+        LDZ $ZP.vval
+        JSR2 @widen
+        LIT2 $0007
+        MUL2
+        ADD2
+        LDZ $ZP.vv
+        JMP2 @glyph
+
+; Stack: x short, y short, glyph short, colour byte. Seven bytes.
+;
+; The seven rows, five columns a row, and the pixel only if its bit is set. The
+; bit test masks first and then ANDs, because AND leaves a byte and a short and
+; a conditional branch between them has no type to check against.
+@glyph
+        STA $ZP.gc
+        STA2 $ZP.gp
+        STA2 $ZP.gy
+        STA2 $ZP.gx
+        LIT $07
+        STA $ZP.grow
+@g-row
+        LDA2 $ZP.gp
+        LDA                     ; the row's five pixels, and its address with it
+        STA $ZP.gr
+        LIT $00
+        STA $ZP.gcol
+@g-col
+        LIT2 @masks                 ; the table's ADDRESS, not what is in it:
+        LDZ $ZP.gcol
+        JSR2 @widen
+        ADD2
+        LDA                     ; the mask for this column
+        LDZ $ZP.gr
+        AND
+        JNZ @g-lit
+        JMP @g-skip
+@g-lit
+        LDA2 $ZP.gx
+        LDZ $ZP.gcol
+        JSR2 @widen
+        ADD2
+        LDA2 $ZP.gy
+        LDZ $ZP.gc
+        JSR2 @plot
+@g-skip
+        LDZ $ZP.gcol
+        LIT $01
+        ADD
+        STA $ZP.gcol
+        LDZ $ZP.gcol
+        LIT $05
+        LTH
+        JNZ @g-col
+        LDA2 $ZP.gp
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.gp
+        LDA2 $ZP.gy
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.gy
+        LDZ $ZP.grow
+        LIT $01
+        SUB
+        DUP
+        STA $ZP.grow
+        JNZ @g-row
+        JMP2r2
+
+; ------------------------------------------------------------------- data
+;
+; Five across, seven down, one byte a row, bit 7 leftmost. So 01110 is $70 and
+; 10001 is $88, and a row is read as binary rather than counted in hex.
+@masks
+        DB $80, $40, $20, $10, $08
+
+@dtab
+        DB $70, $88, $8c, $a0, $c8, $88, $70        ; 0
+        DB $20, $60, $20, $20, $20, $20, $70        ; 1
+        DB $70, $88, $08, $10, $20, $40, $f8        ; 2
+        DB $f8, $10, $20, $10, $08, $88, $70        ; 3
+        DB $10, $30, $50, $90, $f8, $10, $10        ; 4
+        DB $f8, $80, $f0, $08, $08, $88, $70        ; 5
+        DB $30, $40, $80, $f0, $88, $88, $70        ; 6
+        DB $f8, $08, $10, $20, $40, $40, $40        ; 7
+        DB $70, $88, $88, $70, $88, $88, $70        ; 8
+        DB $70, $88, $88, $78, $08, $10, $60        ; 9
+
+@atab
+        DB $70, $88, $88, $f8, $88, $88, $88        ; A
+        DB $f0, $88, $88, $f0, $88, $88, $f0        ; B
+        DB $70, $88, $80, $80, $80, $88, $70        ; C
+        DB $e0, $90, $88, $88, $88, $90, $e0        ; D
+        DB $f8, $80, $80, $f0, $80, $80, $f8        ; E
+        DB $f8, $80, $80, $f0, $80, $80, $80        ; F
+        DB $70, $88, $80, $b8, $88, $88, $78        ; G
+        DB $88, $88, $88, $f8, $88, $88, $88        ; H
+        DB $70, $20, $20, $20, $20, $20, $70        ; I
+        DB $38, $10, $10, $10, $10, $90, $60        ; J
+        DB $88, $90, $a0, $c0, $a0, $90, $88        ; K
+        DB $80, $80, $80, $80, $80, $80, $f8        ; L
+        DB $88, $db, $b5, $b5, $88, $88, $88        ; M
+        DB $88, $d9, $b5, $98, $88, $88, $88        ; N
+        DB $70, $88, $88, $88, $88, $88, $70        ; O
+        DB $f0, $88, $88, $f0, $80, $80, $80        ; P
+        DB $70, $88, $88, $88, $a8, $90, $68        ; Q
+        DB $f0, $88, $88, $f0, $a0, $90, $88        ; R
+        DB $78, $80, $80, $70, $08, $08, $f0        ; S
+        DB $f8, $20, $20, $20, $20, $20, $20        ; T
+        DB $88, $88, $88, $88, $88, $88, $70        ; U
+        DB $88, $88, $88, $88, $88, $50, $20        ; V
+        DB $88, $88, $88, $b5, $b5, $db, $88        ; W
+        DB $88, $88, $50, $20, $50, $88, $88        ; X
+        DB $88, $88, $50, $20, $20, $20, $20        ; Y
+        DB $f8, $08, $10, $20, $40, $80, $f8        ; Z
+
+@mtab
+        DB $00, $00, $00, $00, $00, $00, $00        ; space
+        DB $20, $20, $20, $20, $20, $00, $20        ; !
+        DB $00, $00, $00, $f8, $00, $00, $00        ; -
+        DB $00, $00, $00, $00, $00, $20, $20        ; .

@@ -1,0 +1,79 @@
+; checkera.tal - a chequered band, four pixels of it to a cell
+;
+;   ./duxasm -o roms/checkera.rom asm/checkera.tal
+;   ./duxsdl roms/checkera.rom
+;
+; The cell is chosen from the low bits of (si + sj), so the diagonals read as
+; one colour and the slope of the chequer is visible from a distance. The
+; colour was stored with STA and then handed to @plotat, which pops its own
+; argument and so took whatever sat below it - hence a blank screen.
+INCLUDE "common.tal"
+
+@draw
+        LDZ $ZP.band
+        LIT $01
+        ADD
+        STA $ZP.band
+        JSR2 @clear
+        LIT2 $0000
+        STA2 $ZP.sj
+@row
+        LIT2 $0000
+        STA2 $ZP.si
+@col
+        ; A checkerboard that moves. The parity carries the frame counter, so the
+        ; board slides diagonally; the two colours trade places on alternate
+        ; frames and the count never moves: 288*168/2 = 24192 either way, which
+        ; is what makes it safe to check without pinning a frame.
+        LDA2 $ZP.si
+        LIT2 $0010
+        LTH2
+        JNZ @col-end
+        LDA2 $ZP.si
+        LIT2 $012f
+        GTH2
+        JNZ @col-end
+        LDA2 $ZP.sj
+        LIT2 $0010
+        LTH2
+        JNZ @col-end
+        LDA2 $ZP.sj
+        LIT2 $00b7
+        GTH2
+        JNZ @col-end
+        LDA2 $ZP.si
+        LDA2 $ZP.sj
+        ADD2
+        STA2 $ZP.ex
+        LDZ $ZP.band
+        JSR2 @widen
+        LDA2 $ZP.ex
+        ADD2
+        LIT2 $0001
+        AND2
+        JSR2 @toflag
+        LIT $01
+        ADD
+        JSR2 @plotat
+@col-end
+        LDA2 $ZP.si
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.si
+        LDA2 $ZP.si
+        LIT2 $0140
+        GTH2
+        JNZ @col-end2
+        JMP @col
+@col-end2
+        LDA2 $ZP.sj
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.sj
+        LDA2 $ZP.sj
+        LIT2 $00c8
+        GTH2
+        JNZ @row-end
+        JMP @row
+@row-end
+        JMP2r2

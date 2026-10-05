@@ -1,0 +1,79 @@
+; bitprobe.tal - which nibble of a sprite byte is the pixel, and which way does
+; flip-y mirror? One byte each, nothing else in the file.
+INCLUDE "../asm/common.tal"
+
+@draw
+        JSR2 @clear
+
+        ; data $0f : the low nibble set
+        LIT2 $001e
+        LIT $28
+        JSR2 @put16
+        LIT2 $001e
+        LIT $2a
+        JSR2 @put16
+        LIT2 @a
+        LIT $2c
+        JSR2 @put16
+        LIT $03
+        DEO $2f
+
+        ; data $f0 : the high nibble set
+        LIT2 $001e
+        LIT $28
+        JSR2 @put16
+        LIT2 $0030
+        LIT $2a
+        JSR2 @put16
+        LIT2 @b
+        LIT $2c
+        JSR2 @put16
+        LIT $03
+        DEO $2f
+
+        ; data $80 : one pixel, which end?
+        LIT2 $001e
+        LIT $28
+        JSR2 @put16
+        LIT2 $0042
+        LIT $2a
+        JSR2 @put16
+        LIT2 @c
+        LIT $2c
+        JSR2 @put16
+        LIT $03
+        DEO $2f
+
+        ; data $01 : the other end
+        LIT2 $001e
+        LIT $28
+        JSR2 @put16
+        LIT2 $0054
+        LIT $2a
+        JSR2 @put16
+        LIT2 @d
+        LIT $2c
+        JSR2 @put16
+        LIT $03
+        DEO $2f
+
+        ; sprite $13 (flip), data $ff : which row?
+        LIT2 $001e
+        LIT $28
+        JSR2 @put16
+        LIT2 $0066
+        LIT $2a
+        JSR2 @put16
+        LIT2 @e
+        LIT $2c
+        JSR2 @put16
+        LIT $13
+        DEO $2f
+
+        JMP2r2
+
+@a      DB $0f, $00, $00, $00
+@b      DB $f0, $00, $00, $00
+@c      DB $80, $00, $00, $00
+@d      DB $01, $00, $00, $00
+@e      DB $ff, $00, $00, $00

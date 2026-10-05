@@ -1,0 +1,175 @@
+; nested.tal - twenty-five square outlines, three apart
+;
+;   ./duxasm -o roms/nested.rom asm/nested.tal
+;   ./duxsdl roms/nested.rom
+;
+; A square of half-size 3, then one of half-size 6, and so on up to 75. Three
+; apart means two clear pixels between any two rings, so no ring can touch
+; another and the total is just the sum of the outlines:
+;
+;   the outline of a square of half-size s is 8s pixels, so 24r for ring r
+;   24 * (1 + 2 + ... + 25) = 24 * 325 = 7800
+;
+;   crimson 2808   yellow 2400   blue 2592
+;
+; The three are not equal because twenty-five rings split nine, eight and eight.
+;
+; Nothing is clipped and nothing goes off the edge: the largest ring reaches x 85
+; to 235 and y 25 to 175. The screen port would drop anything outside anyway, but
+; here there is nothing to drop, and a figure that is exactly as big as it means
+; to be is easier to check.
+;
+; Zero page: $22 the row, $24 the centre x, $26 the centre y, $28 a coordinate
+; being walked, $2a and $2c a horizontal run's ends, $2e and $30 a vertical run's
+; ends; $7a the ring, $7b its half-size, $7d the colour.
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        LIT2 $00a0              ; 160
+        STA2 $24
+        LIT2 $0064              ; 100
+        STA2 $26
+        LIT $01
+        STA $7a                 ; ring one
+        LIT $03
+        ; The colour starts at blue because @ring turns it over before drawing,
+        ; and blue turning over is crimson. Starting at crimson gives the
+        ; innermost ring yellow and the three counts come out rotated by one.
+        STA $7d
+
+@ring
+        LDZ $7a
+        LIT $03
+        MUL
+        STA $7b                 ; the half-size is three times the ring number
+        JSR2 @next-colour
+
+        ; The two rows first: y = 100 - s and y = 100 + s, each from x = 160 - s
+        ; to x = 160 + s. SUB2 and ADD2 read the top two shorts and nothing else,
+        ; so each of these is 100 pushed first and the half-size second; there is
+        ; no third value for the centre x to sit under.
+        JSR2 @ends
+        LDA2 $26
+        LDZ $7b
+        JSR2 @widen              ; ADD2 and SUB2 want two shorts and this is
+        SUB2                    ; a byte, so it is widened here
+        STA2 $22
+        JSR2 @hside
+        LDA2 $26
+        LDZ $7b
+        JSR2 @widen
+        ADD2
+        STA2 $22
+        JSR2 @hside
+
+        ; Then the two columns, from y = 100 - s + 1 to y = 100 + s - 1 so that
+        ; the corners belong to the rows and are not drawn twice.
+        JSR2 @ends
+        LDA2 $26
+        LDZ $7b
+        JSR2 @widen
+        SUB2
+        LIT2 $0001
+        ADD2
+        STA2 $2e
+        LDA2 $26
+        LDZ $7b
+        JSR2 @widen
+        ADD2
+        LIT2 $0001
+        SUB2
+        STA2 $30
+        LDA2 $2a
+        STA2 $28
+        JSR2 @vside
+        LDA2 $2c
+        STA2 $28
+        JSR2 @vside
+
+        LDZ $7a
+        LIT $01
+        ADD
+        STA $7a
+        LDZ $7a
+        LIT $19                ; 25 rings
+        GTH
+        JNZ @draw-end
+        JMP @ring
+@draw-end
+        JMP2r2
+
+; The horizontal extent of this ring: $2a is 160 - s and $2c is 160 + s.
+@ends
+        LDA2 $24
+        LDZ $7b
+        JSR2 @widen
+        SUB2
+        STA2 $2a
+        LDA2 $24
+        LDZ $7b
+        JSR2 @widen
+        ADD2
+        STA2 $2c
+        JMP2r2
+
+; Every pixel from $2a to $2c along the row in $22. The colour goes on last:
+; @plot takes colour, y, x off the top in that order.
+@hside
+        LDA2 $2a
+        STA2 $28
+&h
+        LDA2 $28
+        LDA2 $22
+        LDZ $7d
+        JSR2 @plot
+        LDA2 $28
+        LIT2 $0001
+        ADD2
+        STA2 $28
+        LDA2 $28
+        LDA2 $2c
+        GTH2                    ; past the end?
+        JNZ &h-done
+        JMP &h
+&h-done
+        JMP2r2
+
+; Every pixel from $2e to $30 down the column in $28.
+@vside
+        LDA2 $2e
+        STA2 $22
+&v
+        LDA2 $28
+        LDA2 $22
+        LDZ $7d
+        JSR2 @plot
+        LDA2 $22
+        LIT2 $0001
+        ADD2
+        STA2 $22
+        LDA2 $22
+        LDA2 $30
+        GTH2
+        JNZ &v-done
+        JMP &v
+&v-done
+        JMP2r2
+
+; Crimson, yellow, blue. GTH is strict, so "past blue" is the branch and falling
+; through is the ordinary case.
+@next-colour
+        LDZ $7d
+        LIT $01
+        ADD
+        STA $7d
+        LDZ $7d
+        LIT $03
+        GTH
+        JNZ @colour-turn
+        JMP @colour-done
+@colour-turn
+        LIT $01
+        STA $7d
+@colour-done
+        JMP2r2

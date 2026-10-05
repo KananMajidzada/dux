@@ -1,0 +1,60 @@
+# tools/expect.txt - what every ROM should draw, written down before it ran.
+#
+# Fields: rom, lit pixels, distinct colours, background override, comment.
+#
+# All of these INCLUDE asm/common.tal, so the background is black and the three
+# usable colours are white (255,255,255), grey 153 (153,153,153) and grey 85
+# (85,85,85) - one ramp, four bits a channel, 0x0RGB.
+# The background override is "-" for the common case, or --bg=R,G,B when the
+# drawing covers more of the screen than the ground does and the majority rule
+# would guess a painted colour instead of the background.
+# Write the count down BEFORE rendering - it says how many times each loop ran,
+# which is the one fact a picture cannot tell you.
+# Prediction table for tools/verify.sh.
+
+
+clock.rom      190  1  -   DUX_TIME=1791102840 pins it to 12:34:00: white digits on black
+                            reading 1 2 : 3 4 : 0 0 with eight clear pixels between
+                            every two shapes. Six 8x8 bitmap digits at y=90: x 106,
+                            122, 148, 164, 190, 206, and a 2x2-twice colon at x 138
+                            and 180. The strip runs 107 to 212, 106 pixels, centred
+                            on the 160 of a 320-wide screen.
+                            ONE gap size, not two: eight clear pixels between the
+                            digits of a number and eight either side of a colon, so
+                            the strip is a single rhythm the eye can run along. The
+                            clear runs measured off the render are 9, 9, 8, 9, 8, 8,
+                            9 - the nines are the 1 and the 4, which do not use all
+                            eight of their columns, so they measure one short.
+                            Drawn with @plot, one pixel at a time - NOT the sprite
+                            port. A sprite byte is four pixels at two bits each and
+                            those two bits are a colour index, not a pixel, so a
+                            sprite cannot carry a one-bit glyph row at all: it has
+                            to be repacked first, and a repacked row is a second
+                            description of the same shape that can disagree with
+                            the first. @plot takes the font bytes as they are.
+                            All six positions checked against the font table by
+                            tools/checkclock.py at several pinned times, and the
+                            digits were checked to REFRESH: two pinned times must
+                            render differently. The version that cleared only the
+                            old digit boxes passed every other gate while showing
+                            an 8 that had become a 1 sitting on a stripe.
+analog.rom     276  3  -   DUX_TIME=1791094176 pins it to 10:09:36: a clock face with hands,
+                            twelve marks, white hour hand at 46, grey 153 minute hand at 66 and grey
+                            85 second hand at 76, so all three are clear of each other and of the
+                            marks. 48 white, 168 grey 153, 60 grey 85. The count depends on the
+                            time - the hands cross and overlap - which is why it is pinned; the
+                            model in tools/clockmodel.py gives it, and it agrees with the ROM to
+                            the pixel over 101 times, every hour and 40 at random
+cube.rom       8152  1  -   an isometric cube, three faces in white, grey 153 and
+paint.rom       1  1  -   interactive: one mark after two idle frames
+font.rom         1108  2  -   The bitmap character set: ten digits, the alphabet and
+                            four marks, one glyph at a time through @plot. Five
+                            wide, seven down, one byte a row, bit 7 leftmost, so
+                            $70 is 01110 and the shape is in the data. White on
+                            black, the marks in grey.
+                            A specimen sheet, and the reason the seven-segment
+                            digits in clock.rom are the wrong
+                            instrument: a 1 with no foot and a 4 open-topped is a
+                            property of seven pieces, not a bug to tune away.
+                            Eight wide and eight down now, not five by seven: M, N
+                            and W need the diagonals to reach the corners.

@@ -1,0 +1,50 @@
+; step2.tal - a triangle of stripes that walk two columns right per row, so the
+; picture fills from the right and the hypotenuse falls out of the loop.
+
+;   ./duxasm -o roms/step2.rom asm/step2.tal
+;   ./duxsdl roms/step2.rom
+;
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        LIT2 $0000
+        STA2 $ZP.sj
+@row
+        LIT2 $0000
+        STA2 $ZP.si
+@col
+        ; A wedge twice as wide as it is deep: the row may not be longer than
+        ; twice itself. Counted by row, 1+3+5+...+319 for the rows still
+        ; growing - 160 of them, so 160 squared - then 40 full rows at the width
+        ; of the screen: 25600 + 12760 = 38360.
+        LDA2 $ZP.sj
+        LDA2 $ZP.sj
+        ADD2
+        LDA2 $ZP.si
+        GTH2
+        JNZ @col-end
+        LIT $01
+        JSR2 @plotat
+@col-end
+        LDA2 $ZP.si
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.si
+        LDA2 $ZP.si
+        LIT2 $0140
+        GTH2
+        JNZ @col-end2
+        JMP @col
+@col-end2
+        LDA2 $ZP.sj
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.sj
+        LDA2 $ZP.sj
+        LIT2 $00c8
+        GTH2
+        JNZ @row-end
+        JMP @row
+@row-end
+        JMP2r2

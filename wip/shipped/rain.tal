@@ -1,0 +1,141 @@
+; rain.tal - sixty streaks falling a row a frame
+;
+;   ./duxasm -o roms/rain.rom asm/rain.tal
+;   ./duxsdl roms/rain.rom
+;
+; Sixty streaks, three pixels long, one every five columns, each falling one row
+; a frame and wrapping round. A hundred and eighty pixels on every frame, which is
+; the point: @clear has to take all a hundred and eighty of the last frame's away
+; or the count creeps, and over three hundred frames a creeping count is very
+; obvious.
+;
+; There is no per-streak state to keep. Each streak's row is worked out from a
+; single byte that counts the frames:
+;
+;   t = (phase + 4 * i) mod 198
+;
+; and 198 rather than 200 so that t + 2 is still a row on the screen - 197 + 2 is
+; 199, the last one - and the streak never wraps and never gets clipped. So the
+; count is exactly three pixels a streak on every frame, forever, and there is
+; nothing to check about where they are.
+;
+; Zero page: $22 a row, $24 the column, $26 the second row, $28 t, $2a the third
+; row; $7a the frame phase, $7b the streak number, $7c the colour.
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+
+        LDZ $7a                 ; one row further down than last frame
+        LIT $01
+        ADD
+        STA $7a
+        LIT $00
+        STA $7b                 ; streak zero
+        LIT $01
+        STA $7c                 ; crimson, turned over three times per sweep
+
+@streak
+        ; The column: five, then ten, and so on for sixty of them.
+        LDZ $7b
+        JSR2 @widen
+        LIT2 $0005
+        MUL2
+        LIT2 $0005
+        ADD2
+        STA2 $24
+
+        ; t = phase + 4 * i, less 197 as many times as it takes. The phase is a
+        ; byte and 4 * i is at most 236, so 491 at the largest, and two rounds of
+        ; subtracting 197 are always enough: 491 - 394 is 97.
+        ;
+        ; The test is against 196 and not against 197 because GTH2 is strict. That
+        ; is the whole difference between 180 pixels a frame and 179: leaving t at
+        ; 197 put the third row of a streak on row 199, which the port drops, and
+        ; the count came to 179 on the frames where that streak was at the top.
+        ; Reducing to 196 costs one row at the bottom and nothing at all.
+        LDZ $7b
+        JSR2 @widen
+        LIT2 $0004
+        MUL2
+        LDZ $7a
+        JSR2 @widen
+        ADD2
+        STA2 $28
+        LDA2 $28
+        LIT2 $00c4              ; 196
+        GTH2
+        JNZ &less
+        JMP &have-t
+&less
+        LDA2 $28
+        LIT2 $00c4
+        SUB2
+        STA2 $28
+        LDA2 $28
+        LIT2 $00c4
+        GTH2
+        JNZ &less2
+        JMP &have-t
+&less2
+        LDA2 $28
+        LIT2 $00c4
+        SUB2
+        STA2 $28
+&have-t
+        LDA2 $28
+        STA2 $22                ; the three rows of this streak
+        LDA2 $28
+        LIT2 $0001
+        ADD2
+        STA2 $26
+        LDA2 $28
+        LIT2 $0002
+        ADD2
+        STA2 $2a
+
+        JSR2 @next-colour
+
+        ; Three pixels, the colour last: @plot takes colour, y, x off the top.
+        LDA2 $24
+        LDA2 $22
+        LDZ $7c
+        JSR2 @plot
+        LDA2 $24
+        LDA2 $26
+        LDZ $7c
+        JSR2 @plot
+        LDA2 $24
+        LDA2 $2a
+        LDZ $7c
+        JSR2 @plot
+
+        LDZ $7b
+        LIT $01
+        ADD
+        STA $7b
+        LDZ $7b
+        LIT $3b                ; 59: sixty streaks, zero to fifty-nine
+        GTH
+        JNZ @draw-end
+        JMP @streak
+@draw-end
+        JMP2r2
+
+; Crimson, yellow, blue. GTH is strict, so "past blue" is the branch and falling
+; through is the ordinary case.
+@next-colour
+        LDZ $7c
+        LIT $01
+        ADD
+        STA $7c
+        LDZ $7c
+        LIT $03
+        GTH
+        JNZ @colour-turn
+        JMP @colour-done
+@colour-turn
+        LIT $01
+        STA $7c
+@colour-done
+        JMP2r2

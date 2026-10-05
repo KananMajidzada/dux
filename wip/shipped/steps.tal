@@ -1,0 +1,114 @@
+; steps.tal - forty bars standing on the bottom row
+;
+;   ./duxasm -o roms/steps.rom asm/steps.tal
+;   ./duxsdl roms/steps.rom
+;
+; A bar chart with nothing to measure: forty bars of eight columns, the first one
+; pixel high and the last forty, alternating crimson and yellow.
+;
+; Six thousand five hundred and sixty pixels, which is
+;
+;   8 * (1 + 2 + ... + 40) = 8 * 820 = 6560
+;
+; and the two colours are not equal even though the bars are. The crimson ones
+; are the odd-numbered bars by height, so 1, 3, ..., 39, which sum to 400; the
+; yellow ones are 2, 4, ..., 40, which sum to 420. Ten columns more, over three
+; thousand pixels.
+;
+; Nothing divides and nothing multiplies. A counter counts columns and the bar
+; grows when it reaches eight, which is the whole of the arithmetic.
+;
+; Zero page: $22 the column, $2c the column being drawn, $2e the row being drawn;
+; $7a the height of the current bar, $7b how many columns of it are done, $7c the
+; colour, $7d the rows of the current pixel left to draw.
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        LIT2 $0000
+        STA2 $22                ; the column
+        LIT $00
+        STA $7a                 ; the height, as a byte: forty at most
+        LIT $00
+        STA $7b                 ; columns done in this bar
+        LIT $01
+        STA $7c                 ; the colour. The turn happens at a bar boundary,
+                                ; so the first bar is drawn in whatever this is:
+                                ; colour zero would be the background and lost.
+
+@bar
+        LDA2 $22
+        STA2 $2c
+        LIT2 $00c7              ; 199, the bottom row
+        STA2 $2e
+        LDZ $7a
+        LIT $01
+        ADD
+        STA $7d                 ; one more than the height, so one starts at one
+
+@px
+        LDA2 $2c
+        LDA2 $2e
+        LDZ $7c
+        JSR2 @plot
+        LDA2 $2e
+        LIT2 $0001
+        SUB2
+        STA2 $2e
+        LDZ $7d
+        LIT $01
+        SUB
+        STA $7d
+        LDZ $7d
+        LIT $00
+        NEQ                     ; more rows of this pixel?
+        JNZ @px
+
+        LDA2 $22
+        LIT2 $0001
+        ADD2
+        STA2 $22
+        LDZ $7b
+        LIT $01
+        ADD
+        STA $7b
+        LDZ $7b
+        LIT $08
+        EQU                     ; eight columns makes a bar
+        JNZ @bar-tall
+        JMP @bar-next
+@bar-tall
+        LIT $00
+        STA $7b
+        LDZ $7a
+        LIT $01
+        ADD
+        STA $7a
+        JSR2 @next-colour       ; once a bar, not once a column: putting this at
+                                ; the top of @bar gave a barber pole instead
+@bar-next
+        LDA2 $22
+        LIT2 $013f              ; 319, the last column
+        GTH2
+        JNZ @draw-end
+        JMP @bar
+@draw-end
+        JMP2r2
+
+; Crimson, yellow, crimson. The test is "past yellow", so the branch is the
+; normal case and the fall-through is the turn back.
+@next-colour
+        LDZ $7c
+        LIT $01
+        ADD
+        STA $7c
+        LDZ $7c
+        LIT $02
+        GTH
+        JNZ @colour-turn
+        JMP @colour-done
+@colour-turn
+        LIT $01
+        STA $7c
+@colour-done
+        JMP2r2

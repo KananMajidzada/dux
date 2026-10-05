@@ -1,0 +1,47 @@
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        LIT2 $0000
+        STA2 $ZP.sj
+@row
+        LIT2 $0000
+        STA2 $ZP.si
+@col
+        ; Everything on and below the main diagonal: skip where the row is
+        ; deeper than the column. Counted by row, the lit widths are
+        ; 320 + 319 + ... + 121, which is 44100.
+        ;
+        ; I first put 20100 here, having counted the other triangle - the one
+        ; above the diagonal, where the widths run 1 to 200. Same predicate
+        ; either way if you swap which counter you skip on, and the two differ
+        ; by a factor of two and change. Fifth time on this project that the
+        ; arithmetic was wrong and the ROM was right.
+        LDA2 $ZP.sj
+        LDA2 $ZP.si
+        GTH2
+        JNZ @col-end
+        LIT $01
+        JSR2 @plotat
+@col-end
+        LDA2 $ZP.si
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.si
+        LDA2 $ZP.si
+        LIT2 $0140
+        GTH2
+        JNZ @col-end2
+        JMP @col
+@col-end2
+        LDA2 $ZP.sj
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.sj
+        LDA2 $ZP.sj
+        LIT2 $00c8
+        GTH2
+        JNZ @row-end
+        JMP @row
+@row-end
+        JMP2r2

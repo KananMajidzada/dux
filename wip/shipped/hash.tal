@@ -1,0 +1,95 @@
+; hash.tal - a scatter, where the colour comes from a hash of the position
+;
+;   ./duxasm -o roms/hash.rom asm/hash.tal
+;   ./duxsdl roms/hash.rom
+;
+; One pixel in twenty-one, placed by (x*7 + y*13) mod 64 under three. Seven and
+; thirteen are both odd, so every run of sixty-four columns takes each residue
+; exactly once, and three of the sixty-four residues qualify: fifteen dots a
+; row, three thousand over the screen, and the same picture every frame.
+;
+; It took four separate defects to get there, and each one hid the next.
+;
+; The colour was stored with STA and then handed to @plotat, which pops its own
+; argument, so it painted whatever sat underneath - and that store also
+; overwrote the hash, which lived in the same byte. So the colour goes on the
+; stack for @plotat to pop, and the hash moves to $7a.
+;
+; The loop counters were shorts read with LDZ, which reads a single byte, and a
+; short holds its high byte at the *lower* address, so a counter below 256 read
+; as zero every time and the hash was always zero. Both counters are shorts now
+; and both are read with LDZ2, and so is the hash.
+;
+; The screen ports are written directly rather than through @plot, because a
+; byte has to be widened before it can be an address, and @widen exists for
+; exactly that; the alternative is storing it in a zero-page short and reading
+; that back.
+;
+; And the row counter was never given its initial value. @draw cleared the
+; column counter and started, so the first frame drew from whatever was in that
+; cell of memory and every later frame picked up where the last one stopped -
+; three dots on a screen that should hold three thousand, and a scatter that
+; crawled down one row at a time.
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        ; Both counters are shorts and both are read as shorts. $24 is the row
+        ; and $22 the column, and a column count has to reach 320, which no
+        ; single byte can hold.
+        LIT2 $0000
+        STA2 $24
+@row
+        LIT2 $0000
+        STA2 $22
+@col
+        ; hash = (i * 7 + row * 13) & 0x3f
+        LDZ2 $22
+        LIT2 $0007
+        MUL2
+        LDA2 $24
+        LIT2 $000d
+        MUL2
+        ADD2
+        LIT2 $003f
+        AND2
+        STA2 $7a
+
+        ; Under three, draw. GTH2 tests the first value pushed against the
+        ; second, so the branch goes to the increment when the residue is above
+        ; the threshold.
+        LDA2 $7a
+        LIT2 $0002
+        GTH2
+        JNZ @col-end
+
+        LDZ2 $22
+        LIT $SCREEN.x
+        JSR2 @put16
+        LDZ2 $24
+        LIT $SCREEN.y
+        JSR2 @put16
+        LIT $01
+        DEO $SCREEN.pixel
+@col-end
+        LDA2 $22
+        LIT2 $0001
+        ADD2
+        STA2 $22
+        LDA2 $22
+        LIT2 $0140
+        GTH2
+        JNZ @col-end2
+        JMP @col
+@col-end2
+        LDA2 $24
+        LIT2 $0001
+        ADD2
+        STA2 $24
+        LDA2 $24
+        LIT2 $00c8
+        GTH2
+        JNZ @row-end
+        JMP @row
+@row-end
+        JMP2r2

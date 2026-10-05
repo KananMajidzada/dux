@@ -1,0 +1,170 @@
+; spriteprobe.tal - what does a sprite byte actually mean?
+;
+; Everything on this machine that is not drawn per-pixel goes through the Screen
+; device's sprite port, and the layout of that one byte has been guessed at
+; repeatedly and got wrong repeatedly. The guesses that were wrong:
+;
+;   * that the length field is bits 5-6 counting up from one byte
+;   * that a two-byte sprite is four pixels across rather than eight
+;   * that the flip-y bit mirrors inside a byte rather than across the pair
+;
+; Each produced a picture subtly wrong in a way a pixel count could not see, and
+; one of them is why the clock's digits grew a phantom column in the middle.
+;
+; So measure it. Eight sprites, each on its own row, with data chosen so that a
+; single lit pixel in a known byte says which byte is which and which end of a
+; byte is the left: $80 is byte zero's leftmost pixel, $01 byte zero's
+; rightmost, $40 byte one's leftmost, $20 byte two's.
+;
+;   ./duxasm -X -o /tmp/sp.rom wip/spriteprobe.tal
+;   ./dux -n 1 -p /tmp/sp.ppm /tmp/sp.rom
+
+INCLUDE "../asm/common.tal"
+
+@ZP.x    = $90
+@ZP.y    = $92
+@ZP.a    = $94
+@ZP.sp   = $96
+
+@draw
+        JSR2 @clear
+
+        ; The palette. Without this every sprite below is drawn in colour 3 out
+        ; of an entry nobody has set, which on a black background is black - and
+        ; seven sprites "not drawing" is a harness fault, not a fact about the
+        ; port. This is why the first run of this probe reported $13, $23, $43,
+        ; $63, $33 and $53 as drawing nothing at all.
+        LIT2 $0000
+        LIT $40
+        JSR2 @put16                     ; 0 black
+        LIT2 $0fff
+        LIT $42
+        JSR2 @put16                     ; 1 white
+        LIT2 $0999
+        LIT $44
+        JSR2 @put16                     ; 2 light grey
+        LIT2 $0555
+        LIT $46
+        JSR2 @put16                     ; 3 dark grey
+
+
+@ZP.r    = $a0
+@ZP.ml   = $a1
+@ZP.mh   = $a2
+
+        LIT2 $0050
+        LIT $01
+        LIT2 @d0
+        JSR2 @sp1                       ; length 0, data $80
+
+        LIT2 $005a
+        LIT $01
+        LIT2 @d1
+        JSR2 @sp1                       ; length 0, data $01
+
+        LIT2 $0064
+        LIT $11
+        LIT2 @d2
+        JSR2 @sp1                       ; flip, length 0, $80
+
+        LIT2 $006e
+        LIT $21
+        LIT2 @d3
+        JSR2 @sp1                       ; no flip, length 1, $80
+
+        LIT2 $0078
+        LIT $41
+        LIT2 @d4
+        JSR2 @sp1                       ; no flip, length 2, $80 $40
+
+        LIT2 $0082
+        LIT $61
+        LIT2 @d5
+        JSR2 @sp1                       ; no flip, length 3, $80 $40 $20
+
+        LIT2 $008c
+        LIT $31
+        LIT2 @d6
+        JSR2 @sp1                       ; flip, length 1, $80 $00
+
+        LIT2 $0096
+        LIT $51
+        LIT2 @d7
+        JSR2 @sp1                       ; flip, length 2, $80 $40 $00
+
+        JMP2r2
+
+        ; A dot at the left of every test row, drawn per pixel, so each row is
+        ; known to have been reached. Without it a sprite that fails to draw and
+        ; a row that was never visited look identical.
+        LIT $00
+        STA $ZP.r
+@dots
+        LDZ $ZP.r
+        LIT $08
+        LTH
+        JNZ @dots-go
+        JMP @dots-end
+@dots-go
+        LIT2 $0004
+        LDZ $ZP.r
+        JSR2 @mul10
+        LIT2 $0032
+        ADD2
+        LIT2 $0004
+        LDZ $ZP.r
+        JSR2 @mul10
+        ADD2
+        LIT $01
+        JSR2 @plot
+        LDZ $ZP.r
+        LIT $01
+        ADD
+        STA $ZP.r
+        JMP @dots
+@dots-end
+        JMP2r2
+
+; Stack: a byte. Leaves it times ten as a short. The zero goes in the high half,
+; because a short holds its high byte at the lower address.
+@mul10
+        STA $ZP.ml
+        LIT $00
+        STA $ZP.mh
+        LDZ2 $ZP.mh
+        LIT2 $000a
+        MUL2
+        JMP2r2
+
+; Stack: y (short), sprite (byte), data address (short). Five bytes, all used.
+;
+; One routine for the three port writes, because writing the sprite *address*
+; where the y port belongs puts the address of the table on the screen and draws
+; nothing at all, which looks exactly like a sprite port that does not work.
+@sp1
+        STA $ZP.sp
+        STA2 $ZP.a
+        STA2 $ZP.y
+        LDA2 $ZP.x
+        LIT $28
+        JSR2 @put16
+        LDA2 $ZP.y
+        LIT $2a
+        JSR2 @put16
+        LDA2 $ZP.a
+        LIT $2c
+        JSR2 @put16
+        LDZ $ZP.sp
+        DEO $2f
+        JMP2r2
+
+; Four bytes of slack each, so a sprite that reads one byte too many reads zeros
+; and lights nothing rather than the next sprite's bits.
+@d0      DB $80, $00, $00, $00
+@d1      DB $01, $00, $00, $00
+@d2      DB $80, $00, $00, $00
+@d3      DB $80, $00, $00, $00
+@d4      DB $80, $40, $00, $00
+@d5      DB $80, $40, $20, $00
+@d6      DB $80, $00, $00, $00
+@d7      DB $80, $40, $00, $00

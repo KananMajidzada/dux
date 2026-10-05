@@ -1,0 +1,119 @@
+; rings3.tal - three concentric rectangles, tested by equality against the four
+; edges rather than by a distance, so nothing runs per pixel.
+
+;   ./duxasm -o roms/rings3.rom asm/rings3.tal
+;   ./duxsdl roms/rings3.rom
+;
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        LIT2 $0000
+        STA2 $ZP.sj
+@row
+        LIT2 $0000
+        STA2 $ZP.si
+@col
+        ; Three rectangles nested sixteen apart, one colour each. Perimeters of
+        ; 288x168, 256x136 and 224x104: 908 + 780 + 652 = 2340 pixels.
+        ;
+        ; Nothing here does arithmetic on the counters. Every test is a bound or
+        ; an equality, and band, step2 and zigzag all failed with predicates that
+        ; had to work something out first.
+        LDA2 $ZP.si
+        LIT2 $0010
+        LTH2
+        JNZ @col-end
+        LDA2 $ZP.si
+        LIT2 $012f
+        GTH2
+        JNZ @col-end
+        LDA2 $ZP.sj
+        LIT2 $0010
+        LTH2
+        JNZ @col-end
+        LDA2 $ZP.sj
+        LIT2 $00b7
+        GTH2
+        JNZ @col-end
+        LDA2 $ZP.si
+        LIT2 $0010
+        EQU2
+        JNZ @r1t
+        LDA2 $ZP.si
+        LIT2 $012f
+        EQU2
+        JNZ @r1t
+        LDA2 $ZP.sj
+        LIT2 $0010
+        EQU2
+        JNZ @r1t
+        LDA2 $ZP.sj
+        LIT2 $00b7
+        EQU2
+        JNZ @r1t
+        LIT $01
+        JSR2 @plotat
+        JMP @col-end
+@r1t
+        LDA2 $ZP.si
+        LIT2 $0020
+        EQU2
+        JNZ @r2t
+        LDA2 $ZP.si
+        LIT2 $011f
+        EQU2
+        JNZ @r2t
+        LDA2 $ZP.sj
+        LIT2 $0020
+        EQU2
+        JNZ @r2t
+        LDA2 $ZP.sj
+        LIT2 $00a7
+        EQU2
+        JNZ @r2t
+        LIT $02
+        JSR2 @plotat
+        JMP @col-end
+@r2t
+        LDA2 $ZP.si
+        LIT2 $0030
+        EQU2
+        JNZ @r3t
+        LDA2 $ZP.si
+        LIT2 $010f
+        EQU2
+        JNZ @r3t
+        LDA2 $ZP.sj
+        LIT2 $0030
+        EQU2
+        JNZ @r3t
+        LDA2 $ZP.sj
+        LIT2 $0097
+        EQU2
+        JNZ @r3t
+        LIT $03
+        JSR2 @plotat
+@r3t
+@col-end
+        LDA2 $ZP.si
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.si
+        LDA2 $ZP.si
+        LIT2 $0140
+        GTH2
+        JNZ @col-end2
+        JMP @col
+@col-end2
+        LDA2 $ZP.sj
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.sj
+        LDA2 $ZP.sj
+        LIT2 $00c8
+        GTH2
+        JNZ @row-end
+        JMP @row
+@row-end
+        JMP2r2

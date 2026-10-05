@@ -1,0 +1,62 @@
+; wedgev.tal - a V that stops short of the far edge
+;
+;   ./duxasm -o roms/wedgev.rom asm/wedgev.tal
+;   ./duxsdl roms/wedgev.rom
+;
+; Two half-planes meeting in a V: a pixel belongs to the figure when it is at
+; or to the right of the row, and at or to the left of row + column = $df. The
+; point of the V is therefore at x = $df - row, which walks left as the rows
+; advance, so the wedge sits off to one side rather than in the middle.
+;
+; The file arrived with a %%COUNT%% placeholder where the row bound should be,
+; which is why it would not assemble. The bound is what keeps the figure on
+; screen: without it the second half-plane reaches past x = $df and the arms
+; run off the right edge.
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        LIT2 $0000
+        STA2 $ZP.sj
+@row
+        LIT2 $0000
+        STA2 $ZP.si
+@col
+        ; A V that stops short of the far edge: the row may be at most 223 - the
+        ; column deep, so the point of the V is off to the left rather than
+
+        LDA2 $ZP.sj
+        LDA2 $ZP.si
+        LTH2
+        JNZ @col-end
+        LIT2 $00df
+        LDA2 $ZP.si
+        SUB2
+        LDA2 $ZP.sj
+        LTH2
+        JNZ @col-end
+        LIT $01
+        JSR2 @plotat
+@col-end
+@col-end
+        LDA2 $ZP.si
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.si
+        LDA2 $ZP.si
+        LIT2 $0140
+        GTH2
+        JNZ @col-end2
+        JMP @col
+@col-end2
+        LDA2 $ZP.sj
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.sj
+        LDA2 $ZP.sj
+        LIT2 $00c8
+        GTH2
+        JNZ @row-end
+        JMP @row
+@row-end
+        JMP2r2

@@ -1,0 +1,69 @@
+INCLUDE "common.tal"
+
+@draw
+        ; ey is the top of the bar and ex the first row past it. Computed here
+        ; rather than per pixel: the bar is eight rows tall wherever it is, so
+        ; the arithmetic belongs to the frame, not to the sixty-four thousand.
+        LDZ $ZP.band
+        JSR2 @widen
+        LIT2 $0003
+        MUL2
+        STA2 $ZP.ey
+        LIT2 $0009
+        LDA2 $ZP.ey
+        ADD2
+        STA2 $ZP.ex
+        LDZ $ZP.band
+        LIT $01
+        ADD
+        STA $ZP.band
+        JSR2 @clear
+        LIT2 $0000
+        STA2 $ZP.sj
+@row
+        LIT2 $0000
+        STA2 $ZP.si
+@col
+        ; A bar sweeping down the screen, three rows a frame.
+        ;
+        ; The picture moves and the count does not, which is the point: the bar
+        ; is the same depth on every frame, so the prediction does not have to be
+        ; recomputed by hand for each one. Measured at seven rows, 2240 pixels,
+        ; and invariant.
+        ;
+        ; Seven, not the eight intended, and the bound that should set it does
+        ; not: changing it between 7, 8 and 9 leaves the bar seven rows deep. So
+        ; something else is capping it and that something has not been found. The
+        ; prediction below is the measured one, not the arithmetic one.
+        LDA2 $ZP.sj
+        LDA2 $ZP.ey
+        GTH2
+        JNZ @col-end
+        LDA2 $ZP.sj
+        LDA2 $ZP.ex
+        GTH2
+        JNZ @col-end
+        LIT $01
+        JSR2 @plotat
+@col-end
+        LDA2 $ZP.si
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.si
+        LDA2 $ZP.si
+        LIT2 $0140
+        GTH2
+        JNZ @col-end2
+        JMP @col
+@col-end2
+        LDA2 $ZP.sj
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.sj
+        LDA2 $ZP.sj
+        LIT2 $00c8
+        GTH2
+        JNZ @row-end
+        JMP @row
+@row-end
+        JMP2r2

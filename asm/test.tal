@@ -1,0 +1,1246 @@
+; test.tal - does the machine still work?
+;
+; One program that checks everything and prints what it found. Run it after any
+; change to the core, the devices or the assembler:
+;
+;   ./duxasm -o test.rom asm/test.tal
+;   ./dux -n 3 -s /tmp/dux.store test.rom
+;
+; The result is printed, and the two counters are left in the zero page where a
+; host driving the machine can read them out of memory directly: pass at $10,
+; fail at $12, both two bytes with the high half at the lower address. A script
+; that only has the output can gate on the printed line:
+;
+;   ./dux -n 3 asm/test.tal | grep -q ', 0 failed' || echo broken
+;
+; System/state ($0f) is not a status register, so it is not used to carry the
+; count. Writing a nonzero byte to it asks the host to stop, which makes it a
+; boolean "something went wrong" and nothing more.
+;
+; What makes this possible at all is that the framebuffer is not a mystery
+; register: it is ordinary memory at $8000, so a program can draw, read the
+; pixels back, and compare them. Every video check below does exactly that.
+; Nothing else about a device can be verified from inside the machine, which is
+; why the audio, file and clock checks are the weaker ones they are: they can
+; only see what the ports report back.
+;
+; Two rules this file lives by, both enforced by the assembler rather than by
+; remembering:
+;   Every path out of a vector ends in BRK with both stacks empty, so a routine
+;   that returns where a vector should break, or that leaves a byte behind,
+;   fails to assemble rather than to run.
+;   Every zero page name is used at one width throughout, so a byte store cannot
+;   quietly land in the high half of a short.
+
+; --------------------------------------------------------------- devices
+
+@SCREEN.vector = $20
+@SCREEN.width  = $22
+@SCREEN.height = $24
+@SCREEN.auto   = $26
+@SCREEN.x      = $28
+@SCREEN.y      = $2a
+@SCREEN.addr   = $2c
+@SCREEN.pixel  = $2e
+@SCREEN.sprite = $2f
+
+@PAL.c0 = $40
+@PAL.c1 = $42
+@PAL.c2 = $44
+@PAL.c3 = $46
+
+@AUD.channel  = $32
+@AUD.waveform = $33
+@AUD.period   = $34
+@AUD.volume   = $36
+@AUD.note     = $38
+@AUD.beat     = $3a
+@AUD.envelope = $3c
+
+@SYS.state  = $0f
+
+@CONSOLE.str     = $14
+@CONSOLE.print   = $16
+@CONSOLE.send    = $18
+@CONSOLE.high    = $1a
+@CONSOLE.number  = $1c
+@CONSOLE.digit   = $1d
+@CONSOLE.newline = $1e
+
+@FIL.result = $a2
+@FIL.count  = $a4
+@FIL.op     = $a6
+@FIL.status = $a7
+@FIL.name   = $a8
+@FIL.data   = $aa
+
+@CLK.year    = $c2
+@CLK.month   = $c4
+@CLK.day     = $c5
+@CLK.hour    = $c6
+@CLK.minute  = $c7
+@CLK.weekday = $c9
+
+; ------------------------------------------------------------- zero page
+;
+; Anything the devices are asked twice for is a short, kept big-endian: the
+; high byte at the lower address, which is what LDZ2 and STA2 read. A single
+; byte of a short is named separately rather than reached by reading the same
+; name a byte wide, because the assembler warns about that mix and the warning
+; is right.
+@ZP.pass    = $10      ; checks passed, two bytes
+@ZP.fail    = $12      ; checks failed, two bytes
+@ZP.got     = $14      ; what a check read, one byte
+@ZP.want    = $15      ; what it expected, one byte
+@ZP.rx      = $16      ; pixel coordinates for @getpixel, two bytes each
+@ZP.ry      = $18
+@ZP.tmp     = $1a      ; scratch, two bytes
+@ZP.flags   = $1c      ; the sprite value byte used by @fill
+@ZP.seq     = $1e      ; how many checks have run, two bytes
+@ZP.sh      = $21      ; scratch for a shift count; a short needs two names
+@ZP.shhi    = $20
+@ZP.sp0     = $21      ; the two bytes of $be80, low half first
+@ZP.sp1     = $22
+; The short pair @check2 compares has to be contiguous, because LDZ2 reads two
+; bytes from one index. Each half is also named on its own: a byte read of the
+; same name would trip the width lint, and reading $18 a byte wide when the pair
+; lives at $24 and $25 is the kind of mistake the lint exists to catch.
+@ZP.gs      = $24      ; the short that was read
+@ZP.ws      = $26      ; the short it was wanted to be
+@ZP.gslo    = $24      ; its low half, for the failure message
+@ZP.gshi    = $25
+@ZP.wslo    = $26
+@ZP.wshi    = $27
+@ZP.passlo  = $11      ; the low half of pass, for a port that takes a byte
+@ZP.faillo  = $13
+@ZP.seqlo   = $1f
+
+; ------------------------------------------------------------------ reset
+
+@reset
+        ; Counters first, so a check that fails is counted even if what follows
+        ; it goes wrong as well.
+        STA2 $ZP.pass $0000
+        STA2 $ZP.fail $0000
+        STA2 $ZP.seq  $0000
+
+        ; The palette is packed 0x0RGB with four bits each: red in bits 8-11,
+        ; green in 4-7, blue in 0-3. Magenta for the background, so anything
+        ; that fails to draw stands out against it.
+        LIT2 $0f4f
+        LIT $40
+        JSR2 @put16
+        LIT2 $0f00
+        LIT $42
+        JSR2 @put16
+        LIT2 $00f0
+        LIT $44
+        JSR2 @put16
+        LIT2 $0fff
+        LIT $46
+        JSR2 @put16
+
+        ; Clear the framebuffer with the sprite port rather than with stores.
+        ; It covers the screen either way, and this way also runs the sprite
+        ; port four thousand times, which is how a bounds check nobody thought
+        ; about gets found.
+        STA $ZP.flags $a0      ; flat, colour 0, four bytes wide
+        STA2 $ZP.rx $0000
+        STA2 $ZP.ry $0000
+        JSR2 @fill
+
+        JSR2 @test-palette
+        JSR2 @test-geometry
+        JSR2 @test-pixel
+        JSR2 @test-sprite
+        JSR2 @test-flat
+        JSR2 @test-layer
+        JSR2 @test-flip
+        JSR2 @test-bounds
+        JSR2 @test-cursor
+        JSR2 @test-audio
+        JSR2 @test-clock
+        JSR2 @test-file
+
+        JSR2 @report
+
+        ; Ask the host to stop if anything failed. This is the whole of what
+        ; that port can say: it cannot report how much, because it does not
+        ; keep what it is given.
+        LDZ $ZP.faillo
+        DEO $SYS.state
+
+        BRK
+
+; ------------------------------------------------------------------ report
+
+; The Console has three moving parts and they are easy to confuse:
+;   str ($14/$15)  takes a pointer to a NUL-terminated string
+;   print ($16)    prints the string str points at. This is a separate write:
+;                 setting str is not a request to print anything.
+;   high ($1a)     the high half of a number
+;   number ($1c)   prints the number
+;   digit ($1d)    prints a number made from high and one byte off the stack
+;
+; So the high half has to be cleared before each digit, or the digit picks up
+; whatever was left there and prints as a large number instead of one digit.
+@report
+        LIT2 &msg.done
+        DEO2 $CONSOLE.str
+        LIT $01
+        DEO $CONSOLE.print
+
+        LIT $00
+        DEO $CONSOLE.high
+        LDZ $ZP.passlo
+        DEO $CONSOLE.digit
+
+        LIT2 &msg.passed
+        DEO2 $CONSOLE.str
+        LIT $01
+        DEO $CONSOLE.print
+
+        LIT $00
+        DEO $CONSOLE.high
+        LDZ $ZP.faillo
+        DEO $CONSOLE.digit
+
+        LIT2 &msg.failed
+        DEO2 $CONSOLE.str
+        LIT $01
+        DEO $CONSOLE.print
+
+        ; The date, which is the clock device read back and printed.
+        DEI2 $CLK.year
+        DEO2 $CONSOLE.high
+        LIT $01
+        DEO $CONSOLE.number
+
+        LIT $2d
+        DEO $CONSOLE.send
+
+        LIT $00
+        DEO $CONSOLE.high
+        DEI $CLK.month
+        DEO $CONSOLE.digit
+
+        LIT $2d
+        DEO $CONSOLE.send
+
+        LIT $00
+        DEO $CONSOLE.high
+        DEI $CLK.day
+        DEO $CONSOLE.digit
+
+        LIT $0a
+        DEO $CONSOLE.newline
+        JMP2r2
+
+; ------------------------------------------------------------------ checks
+
+; Compare one byte against one, and count the result.
+;
+; Stack: got, want. Both consumed.
+;
+; Two things about this one are easy to get backwards, and both make a test
+; suite that reports the opposite of the truth:
+;
+;   The value arrives underneath the expected one, so the first store takes
+;   the expected value. The other way round compares them the wrong way round.
+;
+;   EQU pushes one when the two are *equal*, and this instruction set has no
+;   jump-if-zero. So the branch has to be the pass one, with the failure on
+;   the fall-through. Jumping to the failure on a nonzero result fails every
+;   check that succeeds.
+;
+; Every check is numbered as it runs and a failure prints its number and both
+; values, because most failures here are one byte being one bit out and
+; guessing which takes longer than printing it.
+@check
+        LDA2 $ZP.seq
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.seq
+
+        STA $ZP.want
+        STA $ZP.got
+        LDZ $ZP.got
+        LDZ $ZP.want
+        EQU
+        JNZ @check-ok
+
+        LDZ2 $ZP.fail
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.fail
+
+        LIT2 &msg.check
+        DEO2 $CONSOLE.str
+        LIT $01
+        DEO $CONSOLE.print
+
+        LIT $00
+        DEO $CONSOLE.high
+        LDZ $ZP.seqlo
+        DEO $CONSOLE.digit
+
+        LIT2 &msg.got
+        DEO2 $CONSOLE.str
+        LIT $01
+        DEO $CONSOLE.print
+
+        LIT $00
+        DEO $CONSOLE.high
+        LDZ $ZP.got
+        DEO $CONSOLE.digit
+
+        LIT2 &msg.want
+        DEO2 $CONSOLE.str
+        LIT $01
+        DEO $CONSOLE.print
+
+        LIT $00
+        DEO $CONSOLE.high
+        LDZ $ZP.want
+        DEO $CONSOLE.digit
+
+        LIT $0a
+        DEO $CONSOLE.newline
+        JMP2r2
+
+@check-ok
+        LDZ2 $ZP.pass
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.pass
+        JMP2r2
+
+; Compare one short against one, and count the result.
+;
+; Stack: got, want. Both consumed.
+;
+; A short is two bytes and STA takes one, so each half needs its own store, and
+; they come off the stack low byte first because that is the order a short is
+; pushed in. Storing only the top of a pair leaves the other underneath for the
+; rest of the run.
+@check2
+        LDA2 $ZP.seq
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.seq
+
+        STA $ZP.wslo
+        STA $ZP.wshi
+        STA $ZP.gslo
+        STA $ZP.gshi
+
+        LDZ2 $ZP.gs
+        LDZ2 $ZP.ws
+        EQU2
+        JNZ @check-ok
+
+        LDZ2 $ZP.fail
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.fail
+
+        LIT2 &msg.check
+        DEO2 $CONSOLE.str
+        LIT $01
+        DEO $CONSOLE.print
+
+        LIT $00
+        DEO $CONSOLE.high
+        LDZ $ZP.seqlo
+        DEO $CONSOLE.digit
+
+        LIT2 &msg.got
+        DEO2 $CONSOLE.str
+        LIT $01
+        DEO $CONSOLE.print
+
+        LIT $00
+        DEO $CONSOLE.high
+        LDZ $ZP.gslo
+        DEO $CONSOLE.digit
+
+        LIT2 &msg.want
+        DEO2 $CONSOLE.str
+        LIT $01
+        DEO $CONSOLE.print
+
+        LIT $00
+        DEO $CONSOLE.high
+        LDZ $ZP.wslo
+        DEO $CONSOLE.digit
+
+        LIT $0a
+        DEO $CONSOLE.newline
+        JMP2r2
+
+; Record a failure from a routine that could not produce a value worth
+; comparing.
+;
+; It must not go through @check with a pair that happens to be equal, because
+; that counts as a *pass*. That is not hypothetical: an earlier version of this
+; file did exactly that in five places, and the summary said everything was
+; fine while the file test was quietly failing every time.
+@fail
+        LDA2 $ZP.seq
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.seq
+
+        LDZ2 $ZP.fail
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.fail
+
+        LIT2 &msg.area
+        DEO2 $CONSOLE.str
+        LIT $01
+        DEO $CONSOLE.print
+        LIT $00
+        DEO $CONSOLE.high
+        LDZ $ZP.seqlo
+        DEO $CONSOLE.digit
+        LIT $0a
+        DEO $CONSOLE.newline
+        JMP2r2
+
+; Print a NUL-terminated string and a newline. The failure paths use this to
+; say which area they are, because a bare number has to be counted back through
+; the file to mean anything.
+;
+; Stack: pointer to the string. Consumed.
+@say
+        STA2 $ZP.tmp
+        LDZ2 $ZP.tmp
+        DEO2 $CONSOLE.str
+        LIT $01
+        DEO $CONSOLE.print
+        LIT $0a
+        DEO $CONSOLE.newline
+        JMP2r2
+
+; ----------------------------------------------------------------- palette
+
+; Write each colour and read it back. A short write puts the high byte at the
+; base port and the low byte at the port above, so DEI2 reads them the same way.
+@test-palette
+        LIT2 $0f4f
+        LIT $40
+        JSR2 @put16
+        DEI2 $PAL.c0
+        LIT2 $0f4f
+        JSR2 @check2
+
+        LIT2 $0123
+        LIT $42
+        JSR2 @put16
+        DEI2 $PAL.c1
+        LIT2 $0123
+        JSR2 @check2
+
+        LIT2 $0abc
+        LIT $44
+        JSR2 @put16
+        DEI2 $PAL.c2
+        LIT2 $0abc
+        JSR2 @check2
+
+        LIT2 $0fff
+        LIT $46
+        JSR2 @put16
+        DEI2 $PAL.c3
+        LIT2 $0fff
+        JSR2 @check2
+        JMP2r2
+
+; ---------------------------------------------------------------- geometry
+
+; Width and height are readable, and every address calculation in the machine
+; assumes them. If these are wrong, so is everything drawn.
+@test-geometry
+        DEI2 $SCREEN.width
+        LIT2 $0140          ; 320
+        JSR2 @check2
+
+        DEI2 $SCREEN.height
+        LIT2 $00c8          ; 200
+        JSR2 @check2
+        JMP2r2
+
+; ------------------------------------------------------------------- pixel
+
+; Draw with the pixel port, then read the framebuffer back out of memory.
+;
+; The read goes through @getpixel rather than straight out of the framebuffer,
+; because the interesting part is the shift: four pixels share a byte, and
+; getting that wrong is exactly what a two-bit framebuffer invites.
+@test-pixel
+        ; x = 20, y = 10, colour 1
+        LIT2 $0014
+        LIT $28
+        JSR2 @put16
+        LIT2 $000a
+        LIT $2a
+        JSR2 @put16
+        LIT $01
+        DEO $SCREEN.pixel
+
+        LIT2 $0014
+        LIT2 $000a
+        JSR2 @getpixel
+        LIT $01
+        JSR2 @check
+
+        ; colour 3 at the neighbouring pixel, which shares the byte with it
+        LIT2 $0015
+        LIT $28
+        JSR2 @put16
+        LIT2 $000a
+        LIT $2a
+        JSR2 @put16
+        LIT $03
+        DEO $SCREEN.pixel
+
+        LIT2 $0015
+        LIT2 $000a
+        JSR2 @getpixel
+        LIT $03
+        JSR2 @check
+
+        ; and its neighbour must have survived being written next to
+        LIT2 $0014
+        LIT2 $000a
+        JSR2 @getpixel
+        LIT $01
+        JSR2 @check
+        JMP2r2
+
+; ------------------------------------------------------------------ sprite
+
+; A masked sprite carrying its own colours, read back a pixel at a time. One
+; call drawing three colours is the whole reason a pixel is two bits.
+@test-sprite
+        LIT2 $0060          ; x = 96
+        LIT $28
+        JSR2 @put16
+        LIT2 $0030          ; y = 48
+        LIT $2a
+        JSR2 @put16
+        LIT2 &rgb
+        LIT $2c
+        JSR2 @put16
+        LIT $20             ; four bytes, no flat bit, no layer
+        DEO $SCREEN.sprite
+
+        ; @rgb is $e4, which is 11 10 01 00: three pixels of three different
+        ; colours and then a transparent one.
+        LIT2 $0060
+        LIT2 $0030
+        JSR2 @getpixel
+        LIT $03
+        JSR2 @check
+
+        LIT2 $0061
+        LIT2 $0030
+        JSR2 @getpixel
+        LIT $02
+        JSR2 @check
+
+        LIT2 $0062
+        LIT2 $0030
+        JSR2 @getpixel
+        LIT $01
+        JSR2 @check
+
+        LIT2 $0063
+        LIT2 $0030
+        JSR2 @getpixel
+        LIT $00
+        JSR2 @check
+        JMP2r2
+
+; -------------------------------------------------------------------- flat
+
+; Bit 7 paints the mask in one colour instead of the data's, which is how a
+; shape is stamped and, with colour 0, erased.
+@test-flat
+        LIT2 $0080          ; x = 128
+        LIT $28
+        JSR2 @put16
+        LIT2 $0040          ; y = 64
+        LIT $2a
+        JSR2 @put16
+        LIT2 &three
+        LIT $2c
+        JSR2 @put16
+        LIT $a1             ; flat, colour 1
+        DEO $SCREEN.sprite
+
+        LIT2 $0080
+        LIT2 $0040
+        JSR2 @getpixel
+        LIT $01
+        JSR2 @check
+
+        ; @three is $fc, which is 11 11 11 00: the fourth pixel of the run is
+        ; transparent in the mask, so nothing is painted there
+        LIT2 $0083
+        LIT2 $0040
+        JSR2 @getpixel
+        LIT $00
+        JSR2 @check
+
+        ; stamp a solid run in colour 2: every lit pixel changes
+        LIT2 $0080
+        LIT $28
+        JSR2 @put16
+        LIT2 $0040
+        LIT $2a
+        JSR2 @put16
+        LIT2 &solid
+        LIT $2c
+        JSR2 @put16
+        LIT $a2             ; flat, colour 2
+        DEO $SCREEN.sprite
+
+        LIT2 $0080
+        LIT2 $0040
+        JSR2 @getpixel
+        LIT $02
+        JSR2 @check
+
+        LIT2 $0083
+        LIT2 $0040
+        JSR2 @getpixel
+        LIT $02
+        JSR2 @check
+
+        ; and in colour 0, which is the erase
+        LIT2 $0080
+        LIT $28
+        JSR2 @put16
+        LIT2 $0040
+        LIT $2a
+        JSR2 @put16
+        LIT $a0             ; flat, colour 0
+        DEO $SCREEN.sprite
+
+        LIT2 $0080
+        LIT2 $0040
+        JSR2 @getpixel
+        LIT $00
+        JSR2 @check
+
+        LIT2 $0083
+        LIT2 $0040
+        JSR2 @getpixel
+        LIT $00
+        JSR2 @check
+        JMP2r2
+
+; ------------------------------------------------------------------- layer
+
+; Layer 1 paints only over pixels that are not already the background, so a
+; sprite can sit on a picture and leave the picture alone.
+@test-layer
+        ; put the pixels under test in a known state: the background
+        LIT2 $00a0          ; x = 160
+        LIT $28
+        JSR2 @put16
+        LIT2 $0050          ; y = 80
+        LIT $2a
+        JSR2 @put16
+        LIT2 &solid
+        LIT $2c
+        JSR2 @put16
+        LIT $a0             ; flat, colour 0: the erase
+        DEO $SCREEN.sprite
+
+        ; layer 1 over the background must not paint
+        LIT2 $00a0
+        LIT $28
+        JSR2 @put16
+        LIT2 $0050
+        LIT $2a
+        JSR2 @put16
+        LIT $a5             ; flat, colour 1, layer 1
+        DEO $SCREEN.sprite
+
+        LIT2 $00a0
+        LIT2 $0050
+        JSR2 @getpixel
+        LIT $00
+        JSR2 @check
+
+        ; put something there, then layer 1 over it: that must paint
+        LIT2 $00a0
+        LIT $28
+        JSR2 @put16
+        LIT2 $0050
+        LIT $2a
+        JSR2 @put16
+        LIT $a1             ; flat, colour 1, layer 0
+        DEO $SCREEN.sprite
+
+        LIT2 $00a0
+        LIT $28
+        JSR2 @put16
+        LIT2 $0050
+        LIT $2a
+        JSR2 @put16
+        LIT $a5             ; flat, colour 1, layer 1
+        DEO $SCREEN.sprite
+
+        LIT2 $00a0
+        LIT2 $0050
+        JSR2 @getpixel
+        LIT $01
+        JSR2 @check
+        JMP2r2
+
+; -------------------------------------------------------------------- flip
+
+; A flip mirrors the four-pixel groups. The pixel order inside a group is not
+; mirrored, so a dot in slot 0 of the first byte lands in slot 0 of the second:
+; four pixels along.
+@test-flip
+        ; a one-pixel dot at x = 200; flipped, it lands at x = 204
+        LIT2 $00c8
+        LIT $28
+        JSR2 @put16
+        LIT2 $0070          ; y = 112
+        LIT $2a
+        JSR2 @put16
+        LIT2 &dot
+        LIT $2c
+        JSR2 @put16
+        LIT $28             ; flip x, four bytes
+        DEO $SCREEN.sprite
+
+        LIT2 $00cc          ; x = 204
+        LIT2 $0070
+        JSR2 @getpixel
+        LIT $03             ; the colour comes from the data, not the value
+        JSR2 @check
+
+        LIT2 $00c8          ; and nothing where it started
+        LIT2 $0070
+        JSR2 @getpixel
+        LIT $00
+        JSR2 @check
+        JMP2r2
+
+; ------------------------------------------------------------------ bounds
+
+; Nothing may write past the framebuffer. The graphics spare at $be80 is the
+; first thing after it, so it is checked after every draw that reaches outside:
+; a pixel one past the right edge, a pixel one past the bottom, and a sprite
+; whose run overshoots the right edge. Which of the three went wrong is the
+; difference between a one-line fix and a search.
+@test-bounds
+        JSR2 @spare-ok
+
+        ; one past the right edge
+        LIT2 $0140
+        LIT $28
+        JSR2 @put16
+        LIT2 $000a
+        LIT $2a
+        JSR2 @put16
+        LIT $01
+        DEO $SCREEN.pixel
+        JSR2 @spare-ok
+
+        ; one past the bottom
+        LIT2 $0000
+        LIT $28
+        JSR2 @put16
+        LIT2 $00c8
+        LIT $2a
+        JSR2 @put16
+        LIT $01
+        DEO $SCREEN.pixel
+        JSR2 @spare-ok
+
+        ; and a sprite whose run runs off the right edge: x = 198 with sixteen
+        ; pixels wanted, so the last five land outside
+        LIT2 $00c6
+        LIT $28
+        JSR2 @put16
+        LIT2 $0070
+        LIT $2a
+        JSR2 @put16
+        LIT2 &solid
+        LIT $2c
+        JSR2 @put16
+        ; $e1, not $a4: bits 5-6 are the length and $e1 sets both of them for
+        ; a four-byte run, while $a4 has bit 2 set, which is the layer, and a
+        ; layer-1 sprite refuses to paint over the background and so draws
+        ; nothing at all.
+        LIT $e1
+        DEO $SCREEN.sprite
+        JSR2 @spare-ok
+
+        ; the pixels inside the edge still drew, so the sprite was not simply
+        ; refused outright
+        LIT2 $00c6
+        LIT2 $0070
+        JSR2 @getpixel
+        LIT $01
+        JSR2 @check
+        JMP2r2
+
+; The spare must be as it was: nothing, and nothing next to it.
+@spare-ok
+        ; Both halves are stashed, because LDA2 puts two bytes on the stack and
+        ; STA takes one: storing only the top of the pair would leave the
+        ; other underneath for the rest of the run. That is the kind of leak
+        ; that shows up nowhere until something else counts the depth.
+        LDA2 $be80
+        STA $ZP.sp0
+        STA $ZP.sp1
+
+        LDZ $ZP.sp0
+        LIT $00
+        EQU
+        JNZ &sp0-clear
+        JMP @spare-bad
+&sp0-clear
+        LDZ $ZP.sp1
+        LIT $00
+        EQU
+        JNZ &sp1-clear
+        JMP @spare-bad
+&sp1-clear
+        JMP2r2
+
+@spare-bad
+        LIT2 &n.spare
+        JSR2 @say
+        ; Report whichever half is the nonzero one. @check takes the value
+        ; first and the expectation second, and the comparison has to happen
+        ; before that pair exists: EQU consumes both of its own operands, so the
+        ; first version compared sp0 against zero and then branched to
+        ; @spare-report with nothing on the stack at all, pushing a lone zero
+        ; where two values belonged. @check read its "got" from below the
+        ; bottom of the stack. Nothing noticed, because this only runs when a
+        ; check has already failed - the one path a self-test never walks.
+        LDZ $ZP.sp0
+        LIT $00
+        NEQ
+        JNZ &got-sp0
+        LDZ $ZP.sp1
+        JMP &got
+&got-sp0
+        LDZ $ZP.sp0
+&got
+        LIT $00
+        JSR2 @check
+        JMP2r2
+
+; ------------------------------------------------------------------ cursor
+
+; The cursor is a readable port pair, and auto-advance moves it on by one.
+@test-cursor
+        LIT2 $0040
+        LIT $28
+        JSR2 @put16
+        LIT2 $0060
+        LIT $2a
+        JSR2 @put16
+
+        DEI2 $SCREEN.x
+        LIT2 $0040
+        JSR2 @check2
+
+        DEI2 $SCREEN.y
+        LIT2 $0060
+        JSR2 @check2
+
+        LIT $00
+        DEO $SCREEN.auto
+        DEI $SCREEN.auto
+        LIT $00
+        JSR2 @check
+
+        ; with auto on, one pixel write moves x along by one
+        LIT $01
+        DEO $SCREEN.auto
+        LIT2 $0040
+        LIT $28
+        JSR2 @put16
+        LIT2 $0060
+        LIT $2a
+        JSR2 @put16
+        LIT $01
+        DEO $SCREEN.pixel
+        DEI2 $SCREEN.x
+        LIT2 $0041
+        JSR2 @check2
+
+        LIT $00
+        DEO $SCREEN.auto
+        JMP2r2
+
+; ------------------------------------------------------------------- audio
+
+; Audio cannot be verified from inside the machine: the samples are made by the
+; host, not by the core. What can be checked is that the ports do what they
+; say -- the note starts, the envelope starts from zero, another channel is
+; unaffected, and writing zero stops it.
+@test-audio
+        LIT $00             ; channel 0
+        DEO $AUD.channel
+
+        LIT $01             ; a square wave
+        DEO $AUD.waveform
+        LIT2 $0400          ; period
+        LIT $34
+        JSR2 @put16
+        LIT2 $4000          ; a loud volume, so the envelope has room
+        LIT $36
+        JSR2 @put16
+        LIT2 $0002
+        LIT $3a
+        JSR2 @put16
+
+        LIT $01
+        DEO $AUD.note
+
+        ; the note port reports whether the channel is sounding
+        DEI $AUD.note
+        LIT $01
+        JSR2 @check
+
+        ; and the envelope restarts from zero when a note starts
+        DEI2 $AUD.envelope
+        LIT2 $0000
+        JSR2 @check2
+
+        ; another channel is unaffected, which is what the channel port is for
+        LIT $01
+        DEO $AUD.channel
+        DEI $AUD.note
+        LIT $00
+        JSR2 @check
+
+        ; stop channel 0, and check it reports off
+        LIT $00
+        DEO $AUD.channel
+        LIT $00
+        DEO $AUD.note
+        DEI $AUD.note
+        LIT $00
+        JSR2 @check
+        JMP2r2
+
+; ------------------------------------------------------------------- clock
+
+; The clock is read-only, so this only checks the fields are in range. A month
+; of zero or an hour of 99 would mean the device is reading the wrong bytes
+; rather than the time.
+;
+; With the value on top of the wanted one, GTH answers "is the value too big"
+; and LTH answers "is the value too small". Getting these the wrong way round
+; fails on every date, which is a cheap way to notice.
+@test-clock
+        DEI $CLK.month
+        STA $ZP.got
+        LIT $01
+        STA $ZP.want
+        LDZ $ZP.got
+        LDZ $ZP.want
+        LTH                    ; month below 1?
+        JNZ @clock-bad
+
+        DEI $CLK.month
+        STA $ZP.got
+        LIT $0c
+        STA $ZP.want
+        LDZ $ZP.got
+        LDZ $ZP.want
+        GTH                    ; month above 12?
+        JNZ @clock-bad
+
+        DEI $CLK.day
+        STA $ZP.got
+        LIT $01
+        STA $ZP.want
+        LDZ $ZP.got
+        LDZ $ZP.want
+        LTH                    ; day below 1?
+        JNZ @clock-bad
+
+        DEI $CLK.day
+        STA $ZP.got
+        LIT $1f
+        STA $ZP.want
+        LDZ $ZP.got
+        LDZ $ZP.want
+        GTH                    ; day above 31?
+        JNZ @clock-bad
+
+        DEI $CLK.hour
+        STA $ZP.got
+        LIT $18
+        STA $ZP.want
+        LDZ $ZP.got
+        LDZ $ZP.want
+        GTH                    ; hour above 23?
+        JNZ @clock-bad
+
+        DEI $CLK.minute
+        STA $ZP.got
+        LIT $3b
+        STA $ZP.want
+        LDZ $ZP.got
+        LDZ $ZP.want
+        GTH                    ; minute above 59?
+        JNZ @clock-bad
+
+        DEI $CLK.weekday
+        STA $ZP.got
+        LIT $06
+        STA $ZP.want
+        LDZ $ZP.got
+        LDZ $ZP.want
+        GTH                    ; weekday above 6?
+        JNZ @clock-bad
+        JMP2r2
+
+@clock-bad
+        LIT2 &n.clock
+        JSR2 @say
+        JSR2 @fail
+        JMP2r2
+
+; -------------------------------------------------------------------- file
+
+; Save a value under a name, then load it into a different place, so a stale
+; copy already in memory cannot make the check pass for the wrong reason.
+@test-file
+        ; The value has to be in memory before it is saved: the store copies
+        ; from RAM, so saving a page that was never written stores whatever
+        ; happened to be there.
+        ;
+        ; A two-operand store reads its operands as address then value, the
+        ; order they are written in, and the assembler swaps them on the way
+        ; out. Reading it the other way round writes the address *as* the
+        ; value, which is how $beef -- just past the framebuffer -- ends up
+        ; holding a pointer.
+        STA2 $1000 $beef
+
+        LIT2 &testname
+        LIT $a8
+        JSR2 @put16
+        LIT2 $1000
+        LIT $aa
+        JSR2 @put16
+        LIT2 $0002          ; how many bytes to save
+        LIT $a4
+        JSR2 @put16
+        LIT $02             ; 2 is save
+        DEO $FIL.op
+
+        DEI $FIL.status
+        LIT $00
+        JSR2 @check
+
+        STA2 $1100 $ffff      ; clear the load buffer first
+        LIT2 $1100
+        LIT $aa
+        JSR2 @put16
+        LIT2 &testname
+        LIT $a8
+        JSR2 @put16
+        LIT $01             ; 1 is load
+        DEO $FIL.op
+
+        DEI2 $FIL.result
+        LIT2 $0002          ; two bytes came back
+        JSR2 @check2
+
+        LDA $1100
+        LIT $be
+        JSR2 @check
+
+        LDA $1101
+        LIT $ef
+        JSR2 @check
+
+        ; a name that was never stored reads as zero bytes, not as an error
+        LIT2 &nosuchname
+        LIT $a8
+        JSR2 @put16
+        LIT2 $1100
+        LIT $aa
+        JSR2 @put16
+        LIT $01
+        DEO $FIL.op
+        DEI2 $FIL.result
+        LIT2 $0000
+        JSR2 @check2
+        JMP2r2
+
+; ----------------------------------------------------------------- drawing
+
+; Read a pixel out of the framebuffer.
+;
+; Stack: x, y. Both consumed. The colour is left behind.
+;
+; The framebuffer is memory, so this is arithmetic and a load: the address is
+; $8000 + (y * 320 + x) / 4, and the pixel is two bits of that byte at a shift
+; of (x & 3) * 2. Two details are easy to get wrong and both are silent:
+; dividing by four is a right shift by *two*, not by four; and SFT takes its
+; count from the top of the stack, so nothing else may sit above it.
+@getpixel
+        STA2 $ZP.ry
+        STA2 $ZP.rx
+
+        LDZ2 $ZP.ry
+        LIT2 $0140          ; 320
+        MUL2
+        LDZ2 $ZP.rx
+        ADD2
+        LIT $02             ; a right shift by two divides by four
+        SFT2
+        LIT2 $8000
+        ADD2
+        LDA                 ; the byte, which holds four pixels
+
+        STA $ZP.got
+        LDZ2 $ZP.rx
+        LIT2 $0003
+        AND2
+        LIT2 $0002
+        MUL2                ; (x & 3) * 2
+        STA $ZP.sh          ; a short is two bytes and STA takes one, so the
+        STA $ZP.shhi        ; high half has to be stored as well
+
+        LDZ $ZP.got
+        LDZ $ZP.sh          ; already the control byte: SFT pops it first
+        SFT
+        LIT $03
+        AND
+        JMP2r2
+
+; Fill the whole screen with the sprite port, at the cursor in ZP.rx and
+; ZP.ry, with the flags in ZP.flags.
+;
+; A sprite covers sixteen pixels, so a row takes twenty calls and the screen two
+; hundred rows: four thousand of them. That is deliberate -- it is how a bounds
+; check nobody thought about gets found -- and it is also why this is the only
+; drawing here that is not verified afterwards.
+@fill
+        STA2 $ZP.tmp $0000
+&fill-row
+        LDA2 $ZP.tmp
+        LIT2 $00c8
+        GTH2
+        JNZ &fill-done
+
+        ; The cursor walks down the screen as the row counter walks, or the
+        ; whole fill lands on row zero four thousand times over.
+        LDA2 $ZP.tmp
+        STA2 $ZP.ry
+
+        LDZ2 $ZP.rx
+        LIT $28
+        JSR2 @put16
+        LDZ2 $ZP.ry
+        LIT $2a
+        JSR2 @put16
+        LIT2 &solid
+        LIT $2c
+        JSR2 @put16
+
+        LDZ $ZP.flags
+        DEO $SCREEN.sprite
+
+        LDA2 $ZP.tmp
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.tmp
+        JMP &fill-row
+
+&fill-done
+        JMP2r2
+
+; --------------------------------------------------------------- device io
+;
+; A device port pair holds its high byte at the base address, and STA cannot be
+; used to reach one: it addresses flat memory, so "STA $2c" writes zero page
+; while the Screen's address port lives at 0x012c. A short going to a device
+; goes through these two, which use the bare DEO and DEI forms, where the port
+; comes off the stack.
+;
+; The byte order comes free: the core pops the port, then the value's high half
+; into the base port and the value's low half into the port above, which is the
+; order every device pair on the page uses.
+
+; Stack: value, then port. Both consumed.
+@put16
+        DEO2
+        JMP2r2
+
+; Stack: port. Replaced by the value, high byte on the bottom.
+@get16
+        DEI2
+        JMP2r2
+
+; ------------------------------------------------------------------- data
+;
+; Data comes after the code: the assembler emits in source order and the reset
+; vector is fixed at 0x0200, so anything ahead of the code would run instead of
+; it.
+;
+; These are "@" and not "&": an "&name" label files itself under the "@name"
+; routine it follows, which here would be @get16, and a reference from @report
+; would not find them.
+
+@msg.done
+        STRZ "dux self test\n"
+@msg.check
+        STRZ "check "
+@msg.got
+        STRZ ": got "
+@msg.want
+        STRZ ", wanted "
+@msg.area
+        STRZ "  check failed: "
+@n.clock
+        STRZ "clock: a field is out of range\n"
+@n.spare
+        STRZ "graphics spare: something wrote past the framebuffer\n"
+@msg.passed
+        STRZ " passed, "
+@msg.failed
+        STRZ " failed, date "
+@testname
+        STRZ "dux-selftest"
+@nosuchname
+        STRZ "dux-never-written"
+
+; A solid run of four pixels, padded out to the four bytes a sprite always
+; reads. Unpadded it would run into the table after it and plot pixels that
+; belong to something else.
+@solid
+        DB $ff, $00, $00, $00
+
+; Three lit pixels and a transparent fourth: $fc is 11 11 11 00.
+@three
+        DB $fc, $00, $00, $00
+
+; One pixel, in slot 0 of the first byte.
+@dot
+        DB $c0, $00, $00, $00
+
+; Three pixels of three different colours and then a transparent one: $e4 is
+; 11 10 01 00. One call, three colours, which is the whole reason a pixel is
+; two bits wide.
+@rgb
+        DB $e4, $00, $00, $00

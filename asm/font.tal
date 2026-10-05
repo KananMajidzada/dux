@@ -1,0 +1,116 @@
+; font.tal - a bitmap character set, drawn a pixel at a time.
+;
+;   ./duxasm -X -o roms/font.rom asm/font.tal
+;   ./dux -n 2 -p /tmp/font.ppm roms/font.rom
+;   ./duxsdl roms/font.rom
+;
+; Why a bitmap and not seven segments
+; ----------------------------------
+; The clock and pong digits are seven-segment sprites, and they will never look
+; right, because a seven-segment figure cannot be a right-shaped digit: the 1 has
+; no foot, the 4 is open-topped, the 7 is bare, and no choice of masks or
+; segment offsets changes that - the shape is not in the data, it is in the
+; seven pieces. That is not a bug to be tuned away, it is the wrong instrument.
+;
+; So every glyph here is a literal picture: seven rows of five pixels, one byte a
+; row, bit 7 the leftmost pixel. What you see is what the table says, pixel for
+; pixel, and changing a glyph means changing one byte.
+;
+; How it is drawn
+; --------------
+; One @plot per lit pixel. Not the sprite port, which packs four pixels to a
+; byte at two bits each (measured, wip/bitprobe.tal) and has to be re-decoded
+; every time something goes wrong in it. @plot is the one drawing path on this
+; machine with no interpretation in it.
+;
+; The five columns of a row are unrolled with their masks written in - $80, $40,
+; $20, $10, $08 - rather than walked round a five-byte table. A mask table needs
+; its address computed, and every way of computing that address on this machine
+; has been wrong at least once: a byte loop that indexes one byte per column and
+; a pointer left at the wrong place both look like a font with holes in it.
+;
+; @glyph hands back the pointer to the NEXT glyph rather than taking an index, so
+; laying out a row of them is a walk with no arithmetic at all. Every glyph is
+; seven bytes, so "next" is "seven further on" and the caller just keeps what it
+; was given. There is no multiply anywhere in this file.
+;
+; Stack contracts, all checked by the assembler and tools/netcheck.py:
+;   @glyph  x short, y short, glyph short, colour byte   seven in, two out
+;   @line   y short, count byte, colour byte              four in, none out
+INCLUDE "common.tal"
+INCLUDE "lib/fontlib.tal"
+
+; --------------------------------------------------------------- zero page
+;
+; Private block per routine, and the blocks do not touch: @glyph calls @plot,
+; which is common.tal's and owns $10 to $26, so everything here starts at $80.
+@ZP.lx    = $8a                    ; @line's walk. The glyph's own cells belong
+@ZP.ly    = $8c                    ; to fontlib, which owns $a0 upwards.
+@ZP.ln    = $8e
+@ZP.lc    = $8f
+
+; ------------------------------------------------------------------ layout
+@X0    = $14                       ; 20
+@PITCH = $0c                       ; 12: five of glyph and seven of space
+@R1.Y  = $18                       ; 24:  the digits
+@R2.Y  = $50                       ; 80:  A to M
+@R3.Y  = $88                       ; 136: N to Z
+@R4.Y  = $c0                       ; 192: the marks
+
+@draw
+        ; The font walks in one piece: the ten digits, then A to Z, then the
+        ; marks, each line handing the pointer on to the next. Four lines and no
+        ; arithmetic, so a glyph cannot be fetched from the wrong place.
+        LIT2 @font
+        STA2 $ZP.fp
+
+        LIT2 @R1.Y
+        LIT $0a                    ; ten digits
+        LIT $01                    ; white
+        JSR2 @line
+
+        LIT2 @R2.Y
+        LIT $0d                    ; thirteen letters, A to M
+        LIT $01
+        JSR2 @line
+
+        LIT2 @R3.Y
+        LIT $0d                    ; thirteen more, N to Z
+        LIT $01
+        JSR2 @line
+
+        LIT2 @R4.Y
+        LIT $04                    ; space, !, -, .
+        LIT $02                    ; grey, to tell them from the rest
+        JSR2 @line
+
+        JMP2r2
+
+; Stack: y short, count byte, colour byte. Four bytes, all used.
+@line
+        STA $ZP.lc
+        STA $ZP.ln
+        STA2 $ZP.ly
+        LIT2 @X0
+        STA2 $ZP.lx
+@line-loop
+        LDA2 $ZP.lx
+        LDA2 $ZP.ly
+        LDA2 $ZP.fp                ; where this glyph is
+        LDZ $ZP.lc
+        JSR2 @glyph
+        STA2 $ZP.fp                ; and @glyph hands back where the next is
+        LDA2 $ZP.lx
+        LIT2 @PITCH
+        ADD2
+        STA2 $ZP.lx
+        LDZ $ZP.ln
+        LIT $01
+        SUB
+        DUP                         ; JNZ eats the flag, so keep a copy to store
+        STA $ZP.ln
+        JNZ @line-loop
+        JMP2r2
+
+; Stack: x short, y short, glyph short, colour byte. Seven bytes in; leaves the
+; address of the NEXT glyph, seven bytes on, as a short.

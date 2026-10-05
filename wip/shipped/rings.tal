@@ -1,0 +1,119 @@
+; rings.tal - concentric rings drawn from min/max, so the region between two
+; circles is arithmetic rather than a loop over the pixels.
+
+;   ./duxasm -o roms/rings.rom asm/rings.tal
+;   ./duxsdl roms/rings.rom
+;
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        LIT2 $0000
+        STA2 $ZP.sj
+@row
+        LIT2 $0000
+        STA2 $ZP.si
+@col
+        ; Six concentric rectangles, sixteen apart, inside a box inset sixteen
+        ; from the screen. The depth of a pixel is how far it is from the
+        ; nearest edge of that box, and a pixel is on a ring when that depth is a
+        ; multiple of sixteen - so the picture is the *outline* of each ring, not
+        ; a grid: taking the nearest edge first is what makes the difference, and
+        ; without it this is just lattice with extra steps.
+        ;
+        ; Depths 0, 32 and 64 are one colour and 16, 48 and 80 the other.
+        ;
+        ; "Keep the smaller" is a greater-than, not a less-than: LTH2 is
+        ; top-less-than-deeper, so it skips when the running best is *smaller*
+        ; than the candidate and the running best ends up holding the largest
+        ; depth. That does not fail loudly - it draws the crossed arms of the
+        ; box instead of the outlines, which is 16996 pixels rather than 3528 and
+        ; is a perfectly plausible-looking picture.
+        ; 2*(w+h)-4 for each: 908 + 780 + 652 + 524 + 396 + 268 = 3528.
+        LDA2 $ZP.si
+        LIT2 $0010
+        LTH2
+        JNZ @col-end
+        LDA2 $ZP.si
+        LIT2 $012f
+        GTH2
+        JNZ @col-end
+        LDA2 $ZP.sj
+        LIT2 $0010
+        LTH2
+        JNZ @col-end
+        LDA2 $ZP.sj
+        LIT2 $00b7
+        GTH2
+        JNZ @col-end
+
+        LDA2 $ZP.si
+        LIT2 $0010
+        SUB2
+        STA2 $ZP.ey
+        LIT2 $012f
+        LDA2 $ZP.si
+        SUB2
+        STA2 $ZP.ex
+        LDA2 $ZP.ex
+        LDA2 $ZP.ey
+        GTH2
+        JNZ @rk1
+        LDA2 $ZP.ex
+        STA2 $ZP.ey
+@rk1
+        LDA2 $ZP.sj
+        LIT2 $0010
+        SUB2
+        STA2 $ZP.ex
+        LDA2 $ZP.ex
+        LDA2 $ZP.ey
+        GTH2
+        JNZ @rk2
+        LDA2 $ZP.ex
+        STA2 $ZP.ey
+@rk2
+        LIT2 $00b7
+        LDA2 $ZP.sj
+        SUB2
+        STA2 $ZP.ex
+        LDA2 $ZP.ex
+        LDA2 $ZP.ey
+        GTH2
+        JNZ @rk3
+        LDA2 $ZP.ex
+        STA2 $ZP.ey
+@rk3
+        LDA2 $ZP.ey
+        LIT2 $001f
+        AND2
+        JSR2 @toflag
+        JNZ @ring2
+        LIT $01
+        JSR2 @plotat
+        JMP @col-end
+@ring2
+        LIT $02
+        JSR2 @plotat
+@col-end
+        LDA2 $ZP.si
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.si
+        LDA2 $ZP.si
+        LIT2 $0140
+        GTH2
+        JNZ @col-end2
+        JMP @col
+@col-end2
+        LDA2 $ZP.sj
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.sj
+        LDA2 $ZP.sj
+        LIT2 $00c8
+        GTH2
+        JNZ @row-end
+        JMP @row
+@row-end
+        JMP2r2

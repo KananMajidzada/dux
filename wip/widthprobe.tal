@@ -1,0 +1,85 @@
+; widthprobe.tal - how many pixels wide is a sprite of each length?
+;
+; Nothing else in this file. No loop, no helper routine, no palette of my own -
+; common.tal sets the palette in its reset vector, and every earlier attempt to
+; measure this port failed because the harness had more moving parts than the
+; thing being measured.
+;
+; Four sprites, all with the data byte $ff, differing only in the length field of
+; the sprite byte. The width that comes out *is* the length. Common.tal's @plot
+; puts one pixel at the top left as well, so a frame that is not blank cannot be
+; mistaken for one where the sprites silently failed.
+;
+;   ./duxasm -X -o /tmp/width.rom wip/widthprobe.tal
+;   ./dux -n 1 -p /tmp/width.ppm /tmp/width.rom
+
+INCLUDE "../asm/common.tal"
+
+@draw
+        JSR2 @clear
+
+        ; One pixel, per pixel, at 10,10. If this does not show, nothing else
+        ; in the frame means anything.
+        LIT2 $000a
+        LIT2 $000a
+        LIT $01
+        JSR2 @plot
+
+        ; sprite $03, data $ff $ff $ff $ff
+        LIT2 $001e
+        LIT $28
+        JSR2 @put16
+        LIT2 $001e
+        LIT $2a
+        JSR2 @put16
+        LIT2 @d1
+        LIT $2c
+        JSR2 @put16
+        LIT $03
+        DEO $2f
+
+        ; sprite $23
+        LIT2 $001e
+        LIT $28
+        JSR2 @put16
+        LIT2 $0030
+        LIT $2a
+        JSR2 @put16
+        LIT2 @d2
+        LIT $2c
+        JSR2 @put16
+        LIT $23
+        DEO $2f
+
+        ; sprite $43
+        LIT2 $001e
+        LIT $28
+        JSR2 @put16
+        LIT2 $0042
+        LIT $2a
+        JSR2 @put16
+        LIT2 @d3
+        LIT $2c
+        JSR2 @put16
+        LIT $43
+        DEO $2f
+
+        ; sprite $63
+        LIT2 $001e
+        LIT $28
+        JSR2 @put16
+        LIT2 $0054
+        LIT $2a
+        JSR2 @put16
+        LIT2 @d4
+        LIT $2c
+        JSR2 @put16
+        LIT $63
+        DEO $2f
+
+        JMP2r2
+
+@d1     DB $ff, $ff, $ff, $ff
+@d2     DB $ff, $ff, $ff, $ff
+@d3     DB $ff, $ff, $ff, $ff
+@d4     DB $ff, $ff, $ff, $ff

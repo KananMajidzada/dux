@@ -1,0 +1,803 @@
+; pong.tal - Pong, one ball, two paddles, on the real clock-free wall of a screen
+;
+;   ./duxasm -o roms/pong.rom asm/pong.tal
+;   ./duxsdl roms/pong.rom        <- the only way to play; the ball needs a mouse
+;
+; The left paddle is the player and follows the mouse's y. That is the right
+; control for this machine rather than the keys: Ctrl/button bit 7 says whether
+; a key is down, but Ctrl/key holds the last key pressed until another arrives,
+; so a paddle driven from it has to notice changes itself, and a paddle that has
+; to notice changes itself is a paddle that will feel wrong. The mouse's y is
+; already a paddle position.
+;
+; The right paddle is the computer. It chases the ball at three pixels a frame
+; and stops dead inside two pixels of it, which is slow enough to beat and quick
+; enough to look like it is trying.
+;
+; The ball is three by three and moves three across and two down, so a frame is
+; a shallow diagonal and a rally is a good deal longer than it looks. It starts
+; at the middle heading right, and every time it touches a paddle it leaves at an
+; angle set by *where* on the paddle it landed - off the middle and it carries
+; on straight, a couple of pixels off and it leaves shallow, six or more off and
+; it leaves steep. That is the whole game: aiming at the edge of a paddle is what
+; makes the other one move, and a ball that always leaves at the same angle is
+; not worth playing against.
+;
+; A miss scores a point and serves from the middle toward the player who let it
+; through. The score stops at nine, because one digit's worth of room is what
+; there is and ten would walk off the end of the segment table.
+;
+; Zero page: $22 the ball's x, $24 its y, $26 its step in x and $28 its step in
+; y (both signed shorts, kept as plain numbers and allowed to go negative), $2a
+; the player's paddle top, $2c the computer's, $2e and $30 the two scores as
+; bytes, $32 which way the next serve goes; $34 to $40 the arithmetic scratch,
+; $42 and $44 a segment's y and x offsets, $46 the mouse's y as a short, $46
+; and $48 a sprite's x and y, $4c a paddle's top, $4e its x, $50 its column, $52
+; its x and $54 its y, $56 its colour; $58 a row of the ball, $5a a sprite's
+; mask; $7a set once @draw has run. $7e and $7f belong to @widen.
+;
+; The picture on any frame is: the centre line and the score in grey 153, the
+; player white, the computer grey 85, and the ball last in white so it lies on
+; top of everything. That order matters, because a ball crossing the centre line
+; hides a dash and the count changes - which is why tools/pongmodel.py predicts
+; every frame from the rules rather than a single number.
+INCLUDE "common.tal"
+
+@MOUSE.ylo   = $95       ; the mouse pair is the other way round: low byte first
+@MOUSE.yhi   = $96
+
+@draw
+        ; Zero page is zeroed when the machine loads, so $7a being clear is the
+        ; first frame, and the ball needs somewhere to start.
+        LDZ $7a
+        JNZ @go
+        JSR2 @init
+        LIT $01
+        STA $7a
+@go
+        JSR2 @clear
+        JSR2 @read-mouse
+        JSR2 @move-player
+        JSR2 @move-ai
+        JSR2 @move-ball
+        JSR2 @check-paddles
+        JSR2 @check-miss
+        JSR2 @draw-dashes
+        JSR2 @draw-score
+        JSR2 @draw-paddles
+        JSR2 @draw-ball
+        JMP2r2
+
+@init
+        LIT2 $009e              ; 158, 98: the middle of the screen
+        STA2 $22
+        LIT2 $0062
+        STA2 $24
+        LIT2 $0003              ; three across
+        STA2 $26
+        LIT2 $0002              ; and two down
+        STA2 $28
+        LIT2 $000d              ; both paddles start a third of the way down
+        STA2 $2a
+        LIT2 $000d              ; and a second literal, because one cannot feed
+        STA2 $2c                ; two stores: STA2 takes its address off the top
+        JMP2r2
+
+; The mouse's y as a short, in two byte reads.
+;
+; DEI2 would be the wrong shape anyway: the mouse pair is low byte first on the
+; device, the opposite of every other pair on the page, so a two-byte read hands
+; back the halves the wrong way round. And the halves do not simply swap when you
+; do it by hand, because a short keeps its *high* byte at the lower address: put
+; the low half at the base and the value reads back multiplied by 256. The mouse
+; starts at zero, so that is invisible until something moves it - and the first
+; eleven frames of this game matched the model exactly with the mouse stuck at
+; zero, which is how it survived.
+@read-mouse
+        DEI $MOUSE.yhi
+        STA $46                ; the high half at the base and the low half one
+        DEI $MOUSE.ylo          ; along: a short keeps its high byte at the lower
+        STA $47                ; address, so the other way round reads the mouse
+        JMP2r2                 ; as its value times 256
+
+; The player's paddle: its middle under the pointer, and never off the screen.
+;
+; The pointer starts at zero, so the subtraction goes under on the very first
+; frame. That is not a special case to guard for, it is the same case as any
+; other frame where the pointer is high: a sum past 32767 means it wrapped, and
+; for a mouse it can only mean negative.
+@move-player
+        LDA2 $46
+        LIT2 $000d              ; 13, half of twenty-six
+        SUB2
+        STA2 $2a
+        LDA2 $2a
+        LIT2 $8000
+        GTH2
+        JNZ @mp-top
+        LDA2 $2a
+        LIT2 $00ae              ; 174: 174 + 25 is the last row on screen
+        GTH2
+        JNZ @mp-bottom
+        JMP2r2
+@mp-top
+        LIT2 $0000
+        STA2 $2a
+        JMP2r2
+@mp-bottom
+        LIT2 $00ae
+        STA2 $2a
+        JMP2r2
+
+; The computer's paddle. It chases while the ball is travelling towards it, and
+; only moves when it is two or more pixels out: inside that it holds still,
+; which is what makes the game winnable rather than a wall.
+; Is the ball coming this way?  Not "is it on my half of the screen" - that gives
+; one frame of movement per rally and then a parked paddle, and the ball walks
+; past every time.  But "is the step positive" is not one comparison either: a
+; step of -3 is 65533 as a short, which is larger than zero, so a single GTH2
+; against 0 says yes for every ball travelling left and the paddle drifts off
+; chasing the ball away from it.  Positive means "above zero *and* below 32768".
+@move-ai
+        LDA2 $26
+        LIT2 $8000
+        GTH2                    ; wrapped, so the ball is going the other way
+        JNZ @ai-idle
+        LDA2 $26
+        LIT2 $0000
+        GTH2
+        JNZ @ai-go
+@ai-idle
+        JMP2r2
+@ai-go
+        LDA2 $24
+        LIT2 $0001
+        ADD2
+        STA2 $34                ; the ball's middle
+        LDA2 $2c
+        LIT2 $000d
+        ADD2
+        STA2 $36                ; the paddle's middle
+        LDA2 $34
+        LDA2 $36
+        SUB2
+        STA2 $38                ; and the difference between them
+        LDA2 $38
+        LIT2 $8000
+        GTH2
+        JNZ @ai-down
+        LDA2 $38
+        LIT2 $0002
+        LTH2                    ; within the dead zone: nothing to do
+        JNZ @ai-done
+        LDA2 $2c
+        LIT2 $0003
+        ADD2
+        STA2 $2c
+        JMP2 @ai-clamp
+@ai-down
+        LIT2 $0000
+        LDA2 $38
+        SUB2                    ; the difference the other way up
+        STA2 $38
+        LDA2 $38
+        LIT2 $0002
+        LTH2
+        JNZ @ai-done
+        LDA2 $2c
+        LIT2 $0003
+        SUB2                    ; SUB2 is first minus second
+        STA2 $2c
+        JMP @ai-clamp
+@ai-clamp
+        LDA2 $2c
+        LIT2 $00ae
+        GTH2                    ; past the bottom?
+        JNZ @ai-clip
+        LDA2 $2c
+        LIT2 $8000
+        GTH2                    ; wrapped, so above the top?
+        JNZ @ai-raise
+@ai-done
+        JMP2r2
+@ai-clip
+        LIT2 $00ae              ; and the clamp has to actually write the bound
+        STA2 $2c                ; back. Testing for it and then returning
+        JMP2r2                 ; anyway is what let the paddle sit one row off
+                                ; the screen and stay there
+@ai-raise
+        LIT2 $0000
+        STA2 $2c
+        JMP2r2
+
+; The ball, one frame.
+@move-ball
+        LDA2 $22
+        LDA2 $26
+        ADD2
+        STA2 $22
+        LDA2 $24
+        LDA2 $28
+        ADD2
+        STA2 $24
+        LDA2 $24
+        LIT2 $8000
+        GTH2
+        JNZ @mb-top
+        LDA2 $24
+        LIT2 $00c5              ; 197: 197 + 2 is the last row on screen
+        GTH2
+        JNZ @mb-bottom
+        JMP2r2
+@mb-top
+        LIT2 $0000
+        STA2 $24
+        JMP2 @mb-turn
+@mb-bottom
+        LIT2 $00c5
+        STA2 $24
+@mb-turn
+        LIT2 $0000
+        LDA2 $28
+        SUB2                    ; the other way up, as two shorts
+        STA2 $28
+        JMP2r2
+
+; A paddle. The ball has to be level with one *and* travelling into it.
+;
+; "Travelling into it" is two comparisons, not one: a step of -3 is 65533 as a
+; short, so a single test against zero says yes for every ball going the other
+; way. Positive means above zero and below 32768.
+;
+; "Level with it" is also two, and each has to come out the right way round.  The
+; comparisons take the *first* value pushed as the left-hand side, so each test
+; here reads the way round it is meant to and not the way round that reads
+; tidily - every level-with test wants "too far away, so give up", and three
+; pushes before an ADD2 make it compare the wrong pair entirely.
+;
+; Each comparison gets its own scratch and its own jump, because the two failures
+; mean different things and a shared "no hit" path cannot tell them apart.
+@check-paddles
+        LDA2 $26
+        LIT2 $8000
+        GTH2                    ; wrapped, so heading left?
+        JNZ @cp-left
+        JMP @cp-right
+
+@cp-left
+        LDA2 $22
+        LIT2 $0003
+        ADD2
+        STA2 $34                ; the ball's right-hand edge
+        LDA2 $34
+        LIT2 $0012
+        LTH2                    ; short of the paddle
+        JNZ @cp-right
+        LDA2 $22
+        LIT2 $0015              ; 21 = 18 + 3
+        GTH2                    ; past it
+        JNZ @cp-right
+        LDA2 $24
+        LIT2 $0002
+        ADD2
+        STA2 $36                ; the ball's bottom row
+        LDA2 $2a
+        LDA2 $36
+        GTH2                    ; the paddle starts below the ball
+        JNZ @cp-right
+        LDA2 $2a
+        LIT2 $0019              ; 25 = 26 - 1
+        ADD2
+        STA2 $38                ; the paddle's last row
+        LDA2 $38
+        LDA2 $24
+        LTH2                    ; and ends above the ball
+        JNZ @cp-right
+        LIT2 $0015
+        STA2 $22                ; out to the paddle's far side
+        LIT2 $0000
+        LDA2 $26
+        SUB2                    ; and back the other way
+        STA2 $26
+        LDA2 $2a
+        JSR2 @english
+        STA2 $28
+        JMP2r2
+
+@cp-right
+        LDA2 $26
+        LIT2 $8000
+        GTH2                    ; wrapped: not heading this way
+        JNZ @cp-nohit
+        LDA2 $26
+        LIT2 $0000
+        GTH2
+        JNZ @cp-r-go
+        JMP2r2
+@cp-r-go
+        LDA2 $22
+        LIT2 $0003
+        ADD2
+        STA2 $34
+        LDA2 $34
+        LIT2 $012b              ; 299
+        LTH2                    ; short of the paddle
+        JNZ @cp-nohit
+        LDA2 $22
+        LIT2 $012d              ; 301 = 299 + 3 - 1: the ball's own width carries
+        GTH2                    ; it past, so 301 is the last touching position
+        JNZ @cp-nohit
+        LDA2 $24
+        LIT2 $0002
+        ADD2
+        STA2 $36
+        LDA2 $2c
+        LDA2 $36
+        GTH2
+        JNZ @cp-nohit
+        LDA2 $2c
+        LIT2 $0019
+        ADD2
+        STA2 $38
+        LDA2 $38
+        LDA2 $24
+        LTH2
+        JNZ @cp-nohit
+        LIT2 $0128              ; 296 = 299 - 3. $012c is 300, which lets the
+        STA2 $22                ; ball sit two pixels inside the paddle
+        LIT2 $0000
+        LDA2 $26
+        SUB2
+        STA2 $26
+        LDA2 $2c
+        JSR2 @english
+        STA2 $28
+@cp-nohit
+        JMP2r2
+
+; A miss, which is the only place the score changes.
+@check-miss
+        LDA2 $22
+        LIT2 $0003
+        ADD2
+        LIT2 $0012              ; 18
+        LTH2                    ; the whole ball past the left paddle?
+        JNZ @cm-left
+        LDA2 $22
+        LIT2 $012d              ; 301: $012e and $012f are 302 and 303, and a
+        GTH2
+        JNZ @cm-right
+        JMP2r2
+@cm-left
+        LDZ $30
+        LIT $01
+        ADD
+        STA $30
+        LIT2 $0000
+        STA2 $32                ; next serve goes left, to whoever let it past
+        JMP2 @serve
+@cm-right
+        LDZ $2e
+        LIT $01
+        ADD
+        STA $2e
+        LIT2 $0001
+        STA2 $32
+        JMP2 @serve
+
+@serve
+        LIT2 $009e
+        STA2 $22
+        LIT2 $0062
+        STA2 $24
+        LDZ2 $32
+        JNZ @sv-right
+        LIT2 $0000
+        LIT2 $0003
+        SUB2                    ; -3
+        STA2 $26
+        JMP @sv-dy
+@sv-right
+        LIT2 $0003
+        STA2 $26
+@sv-dy
+        LIT2 $0002
+        STA2 $28
+        JMP2r2
+
+; Stack: the paddle's top. Leaves the ball's new step in y.
+;
+; Where it lands on the paddle decides where it goes. Straight through the middle
+; and it keeps the angle it had - which is the honest answer, because a ball that
+; changed direction at the exact centre would be a ball with a mind of its own.
+; Two to five pixels off and it leaves shallow, six or more and steep. The three
+; thresholds are the whole skill of the game, and they are why the paddle is
+; worth aiming at rather than just parking.
+@english
+        STA2 $3a                ; the paddle's top
+        LDA2 $24
+        LIT2 $0001
+        ADD2
+        STA2 $3c                ; the ball's middle
+        LDA2 $3a
+        LIT2 $000d
+        ADD2
+        STA2 $3e                ; the paddle's middle
+        LDA2 $3c
+        LDA2 $3e
+        SUB2                    ; where on the paddle it landed
+        STA2 $40
+        LDA2 $40
+        LIT2 $8000
+        GTH2
+        JNZ @en-below
+        LDA2 $40
+        LIT2 $0000
+        GTH2                    ; above the middle?  Not EQU2 and JNZ: EQU2
+        JNZ @en-above           ; pushes one *on* equality, so that pair jumps
+        LDA2 $28                ; away from the dead-centre case, which is the
+        JMP2r2                  ; one case that has to carry on as it was
+@en-above
+        LDA2 $40
+        LIT2 $0005
+        GTH2
+        JNZ @en-up3
+        JMP2 @en-up2
+@en-below
+        LIT2 $0000
+        LDA2 $40
+        SUB2                    ; the other way up, so it can be compared with 2
+        STA2 $40
+        LDA2 $40
+        LIT2 $0005
+        GTH2
+        JNZ @en-dn3
+        JMP2 @en-dn2
+@en-up3
+        LIT2 $0003
+        JMP2r2
+@en-up2
+        LIT2 $0002
+        JMP2r2
+@en-dn3
+        LIT2 $fffd              ; -3
+        JMP2r2
+@en-dn2
+        LIT2 $fffe              ; -2
+        JMP2r2
+
+; ------------------------------------------------------------------ drawing
+
+; The centre line: thirteen dashes of eight rows, one every sixteen. Written as
+; a loop over rows with an "eight on, eight off" test rather than as a 200-byte
+; mask, because a mask that tall does not fit a table and this costs about two
+; thousand steps.
+@draw-dashes
+        LIT2 $0000
+        STA2 $34                ; the row
+        LIT2 $0000
+        STA2 $36                ; the row within the sixteen of a dash and a gap
+@dd-row
+        LDA2 $36
+        LIT2 $0008
+        LTH2                    ; the first eight of the sixteen are the dash
+        JNZ @dd-plot
+        JMP @dd-next
+@dd-plot
+        LIT2 $009f              ; 159
+        LDA2 $34
+        LIT $02                ; the colour, pushed with LIT: LDZ $02 would read
+        JSR2 @plot             ; zero-page address 2, which is zero
+@dd-next
+        LDA2 $36
+        LIT2 $0001
+        ADD2
+        STA2 $36                ; both counters move on every row. Advancing only
+        LDA2 $34                ; the row counter once per sixteen leaves it
+        LIT2 $0001              ; sitting still through eight plots, and the
+        ADD2                    ; centre line comes out as two hundred solid
+        STA2 $34                ; pixels instead of thirteen dashes.
+        LDA2 $36
+        LIT2 $0010              ; sixteen rows: a dash and a gap, then again
+        LTH2
+        JNZ @dd-row
+        LIT2 $0000
+        STA2 $36
+        LDA2 $34
+        LIT2 $00c8              ; 200
+        LTH2
+        JNZ @dd-row
+        JMP2r2
+
+; The score, one digit each side, at the top.
+@draw-score
+        LIT2 $0046              ; 70
+        LIT2 $0008
+        LDZ $2e
+        JSR2 @digit
+        LIT2 $00f2              ; 242
+        LIT2 $0008
+        LDZ $30
+        JSR2 @digit
+        JMP2r2
+
+; Both paddles, three columns of twenty-six. The colour is a byte in $4f, set by
+; the caller, because a routine that took it on the stack would have three
+; arguments and every one of them the wrong width for something else.
+@draw-paddles
+        LIT $01
+        STA $56
+        LIT2 $0012              ; 18
+        LDA2 $2a
+        JSR2 @paddle
+        LIT $03
+        STA $56
+        LIT2 $012b              ; 299
+        LDA2 $2c
+        JSR2 @paddle
+        JMP2r2
+
+; Stack: the paddle's x, then its top. Twenty-six rows by three columns, drawn a
+; pixel at a time because a three-wide column is one sprite and a two-row slice
+; of it is not, and 78 pixels is not worth a mask table to save.
+@paddle
+        STA2 $4c                ; the top
+        STA2 $4e                ; the x
+        LDA2 $4c
+        LIT2 $001a              ; twenty-six rows, so the loop stops at top + 26
+        ADD2
+        STA2 $60                ; worked out once, before the row loop, because
+        LIT2 $0000              ; three pushes and an ADD2 inside the loop is
+        STA2 $50                ; how you get a test on the wrong pair
+@pd-col
+        LDA2 $4e
+        LDA2 $50
+        ADD2
+        STA2 $52
+        LDA2 $4c
+        STA2 $54
+@pd-row
+        LDA2 $52
+        LDA2 $54
+        LDZ $56
+        JSR2 @plot
+        LDA2 $54
+        LIT2 $0001
+        ADD2
+        STA2 $54
+        LDA2 $54
+        LDA2 $60
+        LTH2
+        JNZ @pd-row
+        LDA2 $50
+        LIT2 $0001
+        ADD2
+        STA2 $50
+        LDA2 $50
+        LIT2 $0003
+        LTH2
+        JNZ @pd-col
+        JMP2r2
+
+; The ball: three by three at ($22, $24), in white, drawn last so that it lies
+; on top of the centre line and of a paddle. A ball crossing a dash hides it,
+; and that is a real change in the frame's pixel count, which is why the model
+; predicts every frame from the rules rather than one number for all of them.
+@draw-ball
+        LDA2 $24
+        STA2 $58
+@bl-row
+        LDA2 $22
+        LDA2 $58
+        LIT $01
+        JSR2 @plot
+        LDA2 $22
+        LIT2 $0001
+        ADD2
+        LDA2 $58
+        LIT $01
+        JSR2 @plot
+        LDA2 $22
+        LIT2 $0002
+        ADD2
+        LDA2 $58
+        LIT $01
+        JSR2 @plot
+        LDA2 $58
+        LIT2 $0001
+        ADD2
+        STA2 $58
+        LDA2 $24
+        LIT2 $0003
+        ADD2
+        STA2 $34                ; the ball's last row plus one
+        LDA2 $58
+        LDA2 $34
+        LTH2                    ; three rows: this one, and two more
+        JNZ @bl-row
+        JMP2r2
+
+; ------------------------------------------------------------------- digits
+
+; Stack: x, y, and the value as one byte. All three consumed.
+;
+; The digit is the seven-segment one from asm/clock.tal, seven bits in a byte
+; and a run of seven tests. $3c holds the digit's y as well as the widening
+; scratch, so the segment offsets are added to a copy.
+@digit
+        STA $38                 ; the value, a byte: one digit, so one byte
+        STA2 $3c                ; the y first - it was pushed last, so it is on
+        STA2 $3a                ; top, and taking the x first transposes the
+        LIT $00
+        STA $3e
+        LDZ $38
+        STA $3f
+        LDZ2 $3e                ; the value as a short, so it can index a table
+        LIT2 @segcodes
+        ADD2
+        LDA
+        STA $40
+
+        LDZ $40
+        LIT $01
+        AND
+        JNZ @dg-a
+        JMP @dg-b
+@dg-a
+        LIT2 $0000              ; the top bar
+        LIT2 $0000
+        JSR2 @seg-h
+@dg-b
+        LDZ $40
+        LIT $02
+        AND
+        JNZ @dg-b1
+        JMP @dg-c
+@dg-b1
+        LIT2 $0004              ; the top right
+        LIT2 $0000
+        JSR2 @seg-v
+@dg-c
+        LDZ $40
+        LIT $04
+        AND
+        JNZ @dg-c1
+        JMP @dg-d
+@dg-c1
+        LIT2 $0004              ; the bottom right
+        LIT2 $0003
+        JSR2 @seg-v
+@dg-d
+        LDZ $40
+        LIT $08
+        AND
+        JNZ @dg-d1
+        JMP @dg-e
+@dg-d1
+        LIT2 $0000              ; the bottom bar
+        LIT2 $0006
+        JSR2 @seg-h
+@dg-e
+        LDZ $40
+        LIT $10
+        AND
+        JNZ @dg-e1
+        JMP @dg-f
+@dg-e1
+        LIT2 $0000              ; the bottom left
+        LIT2 $0003
+        JSR2 @seg-v
+@dg-f
+        LDZ $40
+        LIT $20
+        AND
+        JNZ @dg-f1
+        JMP @dg-g
+@dg-f1
+        LIT2 $0000              ; the top left
+        LIT2 $0000
+        JSR2 @seg-v
+@dg-g
+        LDZ $40
+        LIT $40
+        AND
+        JNZ @dg-g1
+        JMP2r2
+@dg-g1
+        LIT2 $0000              ; the middle bar
+        LIT2 $0003
+        JMP2 @seg-h
+
+; Stack: the segment's x offset, then its y offset. Both relative to the digit.
+; The offsets come off the stack the other way round from how they went on: a
+; segment is pushed as (x, y), so the y is on top and is taken first. Reading
+; them back the same way puts every vertical segment at its own x-offset and
+; every horizontal one at its y-offset, which draws the digit as a fourteen-wide
+; smear instead of an eight-wide figure - and it is still one colour, still the
+; right number of segments, and still recognisably a seven-segment digit.
+@seg-h
+        STA2 $42                ; the y offset
+        STA2 $44                ; then the x offset
+        LIT2 @hseg
+        STA2 $5a                ; the mask, which is the whole difference between
+        JMP2 @draw-seg          ; a bar and a column
+
+; A vertical segment is two two-row stamps four rows apart, not one tall stamp:
+; a sprite can only mirror itself onto the row below, so anything taller is two
+; calls. Which is why the y offset is added once and $48 bumped once, rather than
+; the offsets being recomputed.
+@seg-v
+        STA2 $42
+        STA2 $44
+        LIT2 @vseg
+        STA2 $5a
+        JSR2 @draw-seg
+        LDZ2 $48
+        LIT2 $0002
+        ADD2
+        STA2 $48
+        JMP2 @set-spr
+
+@draw-seg
+        LDZ2 $3a
+        LDZ2 $44
+        ADD2
+        STA2 $46                ; the digit's x plus the segment's
+        LDZ2 $3c
+        LDZ2 $42
+        ADD2
+        STA2 $48                ; and its y plus the segment's
+        JMP2 @set-spr
+
+; The mask comes from $5a rather than being fixed here. Hard-coding the
+; horizontal one stamps every vertical segment as an eight-wide bar, which fills
+; the gaps in the middle of a zero and turns the whole digit into a solid block
+; - the right number of segments, the right colour, still seven tests, and no
+; visible way of being wrong except that it is not a digit any more.
+@set-spr
+        LDZ2 $46
+        LIT $SCREEN.x
+        JSR2 @put16
+        LDZ2 $48
+        LIT $SCREEN.y
+        JSR2 @put16
+        LDZ2 $5a
+        LIT $SCREEN.addr
+        JSR2 @put16
+        LIT $b2                ; flat, two bytes, two rows, colour 2
+        DEO $SCREEN.sprite
+        JMP2r2
+
+; -------------------------------------------------------------------- data
+
+; Which segments each digit lights, one byte each: bit 0 is the top bar, then
+; clockwise from the top right. Ten of them, because the score stops at nine.
+@segcodes
+        DB $3f          ; 0
+        DB $06          ; 1
+        DB $5b          ; 2
+        DB $4f          ; 3
+        DB $66          ; 4
+        DB $6d          ; 5
+        DB $7d          ; 6
+        DB $07          ; 7
+        DB $7f          ; 8
+        DB $6f          ; 9
+
+; A sprite byte holds four pixels at two bits each, so a bar eight across is two
+; bytes of $ff - not $ff, $c0 as asm/clock.tal has, which is only six across.
+; Both are right for their own digit; the difference is four pixels a segment, so
+; it is four pixels a bar that the prediction has to know about.
+@hseg
+        DB $ff, $ff, $00, $00
+
+; One two-pixel column, and @seg-v stamps it twice.
+;
+; $f0 and not $c0, and this is the second mask here to be miscounted. A byte is
+; four pixels at two bits each, taken from the top: $c0 sets the first pair of
+; bits and nothing else, so it is one pixel across. $f0 sets the first two pairs,
+; which is two. asm/clock.tal uses $c0 for its verticals, so its digits are one
+; pixel thick, which is right there and wrong here - and the symptom is exactly
+; sixteen pixels per frame, two columns of a digit times four rows, twice over.
+@vseg
+        DB $f0, $00, $00, $00

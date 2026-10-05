@@ -1,0 +1,1678 @@
+; A cube, turning.
+;
+; Six solid faces rather than twelve edges, because a flat quad costs a few
+; hundred pixels a frame and there are six of them. The faces are painted back
+; to front, so there is no depth buffer at all: the cube is convex, which means
+; the furthest face is always the same face.
+;
+; The rotation is three successive turns, one about each axis. The original's
+; three expressions do not look like that, but they are exactly it: the same
+; three turns in the same order with every angle negated. That is why the signs
+; below read the way they do rather than the way they usually would.
+;
+; Everything is Q6, so sixty-four is one unit and the corners sit at +/-32.
+; Perspective is a plain divide because the depth is the turned z plus a
+; constant, and that is never negative.
+;
+; Two machine details this leans on, both worth writing down because getting
+; either wrong looks like a maths error and is not:
+;
+;   LDA2 $nn reads the short at *zero page* $nn. A bare LDA2 pops a sixteen-bit
+;   address off the stack and reads the short *there*. Same for STA2. Four
+;   different instructions, and the difference between "load my scratch" and
+;   "dereference a pointer".
+;
+;   A short keeps its high byte at the lower address, while the stack keeps its
+;   low byte on top. The same number is stored in opposite orders in the two
+;   places, and every split and rejoin here has to respect both.
+
+; ------------------------------------------------------------------ zero page
+;
+; Every short is named twice, once for the pair and once for its high byte,
+; because testing a sign means reading that byte on its own.
+
+@ZP.angA    = $10      ; the three turns, as table indices
+@ZP.angAl   = $11
+@ZP.angB    = $12
+@ZP.angBl   = $13
+@ZP.angC    = $14
+@ZP.angCl   = $15
+@ZP.vi      = $16      ; the corner index, as a short: high byte then low
+@ZP.vilo    = $17      ; which corner is being turned
+@ZP.a       = $18      ; its coordinates
+@ZP.ah      = $18
+@ZP.b       = $1a
+@ZP.bh      = $1a
+@ZP.c       = $1c
+@ZP.ch      = $1c
+@ZP.r1      = $1e      ; and the results of each turn
+@ZP.r1h     = $1e
+@ZP.r2      = $20
+@ZP.r2h     = $20
+@ZP.r3      = $22
+@ZP.r3h     = $22
+@ZP.s1      = $24
+@ZP.s1h     = $24
+@ZP.s2      = $26
+@ZP.s2h     = $26
+@ZP.s3      = $28
+@ZP.s3h     = $28
+@ZP.s4      = $2a
+@ZP.s4h     = $2a
+@ZP.t1      = $2c      ; scratch
+@ZP.t1h     = $2c
+@ZP.t2      = $2e
+@ZP.t2h     = $2e
+@ZP.t3      = $30
+@ZP.t3h     = $30
+@ZP.z       = $32      ; depth: turned z plus the camera distance
+@ZP.zh      = $32
+@ZP.best    = $34      ; furthest face so far, while ordering
+@ZP.besth   = $34
+@ZP.bi      = $36      ; and which one it was
+@ZP.i       = $37      ; loop counters
+@ZP.i2      = $38      ; a byte loop counter
+@ZP.ci      = $6c      ; the corner index: high byte, then low
+@ZP.cilo    = $6d
+@ZP.j       = $39
+@ZP.k       = $3a
+@ZP.kh      = $3a
+@ZP.sgn     = $3c      ; sign flags, one byte each
+@ZP.sgn2    = $3d
+@ZP.tmp     = $3e
+@ZP.tmph    = $3e
+@ZP.tmpl    = $3f
+@ZP.absr    = $40      ; @abs2 works here so it never disturbs a live value
+@ZP.absrh   = $40
+@ZP.ax      = $42      ; the two ends of the span being filled
+@ZP.ay      = $44
+@ZP.bx      = $46
+@ZP.by      = $48
+@ZP.dax     = $4a      ; and their per-step deltas
+@ZP.day     = $4c
+@ZP.dbx     = $4e
+@ZP.dby     = $50
+@ZP.ex0     = $46      ; @edgey's two ends, ordered left to right. These have to
+@ZP.ey0     = $48      ; be somewhere @smul does not use, or the multiply that
+@ZP.ex1     = $4e      ; finds the crossing point destroys them on the way.
+@ZP.ey1     = $50
+@ZP.px2     = $52      ; the line drawer's point and end point
+@ZP.py2     = $54
+@ZP.ex2     = $56
+@ZP.ey2     = $58
+@ZP.absdx   = $5a      ; its deltas, error term and step
+@ZP.absdy   = $5c
+@ZP.err     = $5e
+@ZP.stp     = $60
+@ZP.stp2    = $62
+@ZP.cnt     = $64
+@ZP.row     = $66      ; the erase
+@ZP.col     = $68
+@ZP.colour  = $6a
+@ZP.e1x     = $70      ; the two edges a span crosses, as vectors
+@ZP.e1y     = $72
+@ZP.e2x     = $74
+@ZP.e2y     = $76
+@ZP.sp      = $78      ; the span index, as a short
+@ZP.spw     = $7a      ; and the same index as a short, for the multiply
+@ZP.e1x     = $70      ; the two edges a span crosses, as vectors
+@ZP.e1y     = $72
+@ZP.e2x     = $74
+@ZP.e2y     = $76
+@ZP.sp      = $78      ; the span index, as a short
+@ZP.spw     = $7a      ; and the same index as a short, for the multiply
+@ZP.n       = $7c      ; spans needed: the longer edge, so one per pixel
+@ZP.big     = $6e      ; scratch for @bigger
+@ZP.lo      = $00      ; the column fill: the top and bottom of the face so far
+@ZP.hi      = $02
+@ZP.yv      = $04      ; where the edge under test crosses this column
+@ZP.yvh     = $04
+@ZP.xw      = $06      ; the column, as a short
+@ZP.xmin    = $08
+@ZP.xmax    = $0a
+@ZP.colx    = $0c      ; the column being filled, as a short
+
+@SCREEN.vector = $20
+@SCREEN.x      = $28
+@SCREEN.y      = $2a
+@SCREEN.addr   = $2c
+@SCREEN.pixel  = $2e
+@SCREEN.sprite = $2f
+
+; Camera distance and projection scale. After the turn the corners sit within
+; about 56 of the origin, so the depth runs from roughly 104 to 216 and the
+; offsets land inside a hundred-pixel radius.
+@CAMERA    = $00a0
+@KPROJ     = $00be
+
+; How many spans a face is filled with. Twelve is a compromise: fewer and the
+; left and right edges visibly step, more and the frame runs out of steps.
+@SPANS     = $0060
+
+; ------------------------------------------------------------------ reset
+
+@reset
+        ; Four colours, packed 0x0RGB with four bits a channel: black, then
+        ; white and two greys for the faces. It was crimson, green and yellow
+        ; once - distinct hues rather than three steps of one colour, on the
+        ; grounds that the faces are told apart by colour alone. They are also
+        ; told apart by where they are, and the greys hold up: white, 153 and
+        ; 85 are far enough apart on a black ground that all six faces read.
+        LIT2 $0000
+        LIT $40
+        JSR2 @put16
+        ; Red is bits 8-11, green 4-7 and blue 0-3 - palette_store in host.c
+        ; masks each nibble out of the short before widening it. Written as
+        ; $0c1 and $1c0 they put a single step of blue and of *red* where the
+        ; crimson and green belong, and the cube came out two dark greens and a
+        ; yellow instead of crimson, green and yellow.
+        LIT2 $0fff
+        LIT $42
+        JSR2 @put16
+        LIT2 $0999
+        LIT $44
+        JSR2 @put16
+        LIT2 $0555
+        LIT $46
+        JSR2 @put16
+
+        LIT2 @on-frame
+        LIT $20
+        JSR2 @put16
+
+        ; The three angles start at zero. The low halves are what @frame-body
+        ; increments and the whole short is what @turn reads through LDA2, so
+        ; both halves have to be zero and each store needs its own literal: a
+        ; second STA would pop a byte nobody pushed, and since these run inside
+        ; the frame as well as at reset that is one byte per store per frame -
+        ; twelve a frame, which is what the host used to report.
+        STA $ZP.angAl $00
+        STA $ZP.angBl $00
+        STA $ZP.angCl $00
+
+        ; One frame now, so there is a cube on screen before the first tick.
+        JSR2 @frame-body
+
+        ; The reset vector is not called, so it ends in BRK. JMP2r2 would pop a
+        ; return address off an empty return stack and jump wherever it found.
+        BRK
+
+@on-frame
+        JSR2 @frame-body
+        BRK
+
+@frame-body
+        ; Two steps a turn is about 0.05 radians. The third turn is the slow one
+        ; and moves every other frame, which is the same ratio as the original.
+        LDA $ZP.angAl
+        LIT $02
+        ADD
+        STA $ZP.angAl
+        LDA $ZP.angBl
+        LIT $02
+        ADD
+        STA $ZP.angBl
+        LDA $ZP.angCl
+        LIT $01
+        ADD
+        STA $ZP.angCl
+
+        JSR2 @clear
+
+        ; Turn and project all eight corners. The counter is the low half of the
+        ; index short, and the high half is cleared by @takei on every pass, so
+        ; only the low half needs starting here. Clearing both from one literal
+        ; would have the second store pop a byte nobody pushed.
+        LIT $00
+        STA $ZP.vilo
+@all-corners
+        LDZ $ZP.vilo
+        JSR2 @turn
+        LDZ $ZP.vilo
+        JSR2 @project
+
+        LDZ $ZP.vilo
+        LIT $01
+        ADD
+        STA $ZP.vilo
+        LDZ $ZP.vilo
+        LIT $08
+        LTH
+        JNZ @all-corners
+
+        JSR2 @face-depths
+
+        ; Six times: find the furthest face still unpainted, paint it, rule it
+        ; out by pushing its key past anything real.
+        LIT $00
+        STA $ZP.i
+@sort-pass
+        ; Painter's algorithm: the furthest face has to go down first, so the
+        ; scan keeps the largest key and best starts at zero. Zero is also what
+        ; a face already painted is marked with, which means a finished face
+        ; always compares smallest and is never picked a second time.
+        LIT2 $0000
+        STA2 $ZP.best
+        LIT $00
+        STA $ZP.bi
+
+        LIT $00
+        STA $ZP.i2
+@sort-scan
+        LDZ $ZP.i2
+        JSR2 @wide
+        LIT $10
+        SFT2
+        LIT2 @keys
+        ADD2
+        LDA2
+        STA2 $ZP.k
+
+        ; A larger key than the best so far takes over.
+        LDA2 $ZP.best
+        LDA2 $ZP.k
+        LTH2
+        JNZ @sort-take
+        JMP @sort-keep
+@sort-take
+        LDA2 $ZP.k
+        STA2 $ZP.best
+        LDZ $ZP.i2
+        STA $ZP.bi
+@sort-keep
+        LDZ $ZP.i2
+        LIT $01
+        ADD
+        STA $ZP.i2
+        LDZ $ZP.i2
+        LIT $06
+        LTH
+        JNZ @sort-scan
+
+        ; The face index goes in memory, and @fill reads it from there. It used to
+        ; be stored and then pushed again, on the assumption that @fill wanted it
+        ; as an argument - but @fill's first act is `LDZ $ZP.j`, so it reads the
+        ; memory itself and the pushed byte was never consumed. That is one byte
+        ; per sort pass, and the sort loop runs six times a frame: the six bytes
+        ; the host reported.
+        LDZ $ZP.bi
+        STA $ZP.j
+        JSR2 @fill
+
+        ; The value goes on first: a bare STA2 takes the address from the top of
+        ; the stack, so pushing them the other way round writes the key to
+        ; address $0000 and leaves every key real. Then the face is picked again
+        ; on the next pass and the sort never moves on.
+        LIT2 $0000
+        LDZ $ZP.bi
+        LIT $10
+        SFT
+        JSR2 @wide
+        LIT2 @keys
+        ADD2
+        STA2
+
+        LDZ $ZP.i
+        LIT $01
+        ADD
+        STA $ZP.i
+        LDZ $ZP.i
+        LIT $06
+        LTH
+        JNZ @sort-pass
+        JMP2r2
+
+; ---------------------------------------------------------------- the turn
+;
+; Corner $ZP.vi in, four shorts written to the turned table. The sign of each
+; angle is already folded into the formulas, so these are three ordinary
+; rotations rather than three negated ones.
+
+@turn
+        JSR2 @takei
+
+        ; Vertex table: three shorts a corner, so the index is scaled by six and
+        ; the address is left on the stack for the bare LDA2 to dereference.
+        LDZ2 $ZP.ci
+        LIT2 $0006
+        MUL2
+        LIT2 @verts
+        ADD2
+        LDA2
+        STA2 $ZP.a
+
+        LDZ2 $ZP.ci
+        LIT2 $0006
+        MUL2
+        LIT2 @verts
+        ADD2
+        LIT2 $0002
+        ADD2
+        LDA2
+        STA2 $ZP.b
+
+        LDZ2 $ZP.ci
+        LIT2 $0006
+        MUL2
+        LIT2 @verts
+        ADD2
+        LIT2 $0004
+        ADD2
+        LDA2
+        STA2 $ZP.c
+
+        ; About x, by the negative of the first turn:
+        ;   y1 = (y*cos + z*sin) / 64
+        ;   z1 = (z*cos - y*sin) / 64
+        LDA2 $ZP.angA
+        JSR2 @cos
+        STA2 $ZP.t2
+        LDA2 $ZP.b
+        LDZ2 $ZP.t2
+        JSR2 @term
+        STA2 $ZP.r1
+
+        LDA2 $ZP.angA
+        JSR2 @sin
+        STA2 $ZP.t2
+        LDA2 $ZP.c
+        LDZ2 $ZP.t2
+        JSR2 @term
+        STA2 $ZP.t3
+        LDA2 $ZP.r1
+        LDA2 $ZP.t3
+        ADD2
+        STA2 $ZP.r1
+
+        LDA2 $ZP.angA
+        JSR2 @cos
+        STA2 $ZP.t2
+        LDA2 $ZP.c
+        LDZ2 $ZP.t2
+        JSR2 @term
+        STA2 $ZP.r2
+
+        LDA2 $ZP.angA
+        JSR2 @sin
+        STA2 $ZP.t2
+        LDA2 $ZP.b
+        LDZ2 $ZP.t2
+        JSR2 @term
+        STA2 $ZP.t3
+        LDA2 $ZP.r2
+        LDA2 $ZP.t3
+        SUB2
+        STA2 $ZP.r2
+
+        ; About y, by the negative of the second:
+        ;   x2 = (x*cos - z1*sin) / 64
+        ;   z2 = (z1*cos + x*sin) / 64
+        LDA2 $ZP.angB
+        JSR2 @cos
+        STA2 $ZP.t2
+        LDA2 $ZP.a
+        LDZ2 $ZP.t2
+        JSR2 @term
+        STA2 $ZP.s1
+
+        LDA2 $ZP.angB
+        JSR2 @sin
+        STA2 $ZP.t2
+        LDA2 $ZP.r2
+        LDZ2 $ZP.t2
+        JSR2 @term
+        STA2 $ZP.t3
+        LDA2 $ZP.s1
+        LDA2 $ZP.t3
+        SUB2
+        STA2 $ZP.s1
+
+        LDA2 $ZP.angB
+        JSR2 @cos
+        STA2 $ZP.t2
+        LDA2 $ZP.r2
+        LDZ2 $ZP.t2
+        JSR2 @term
+        STA2 $ZP.s2
+
+        LDA2 $ZP.angB
+        JSR2 @sin
+        STA2 $ZP.t2
+        LDA2 $ZP.a
+        LDZ2 $ZP.t2
+        JSR2 @term
+        STA2 $ZP.t3
+        LDA2 $ZP.s2
+        LDA2 $ZP.t3
+        ADD2
+        STA2 $ZP.s2
+
+        ; About z, by the negative of the third:
+        ;   x3 = (x2*cos + y1*sin) / 64
+        ;   y3 = (y1*cos - x2*sin) / 64
+        LDA2 $ZP.angC
+        JSR2 @cos
+        STA2 $ZP.t2
+        LDA2 $ZP.s1
+        LDZ2 $ZP.t2
+        JSR2 @term
+        STA2 $ZP.s3
+
+        LDA2 $ZP.angC
+        JSR2 @sin
+        STA2 $ZP.t2
+        LDA2 $ZP.r1
+        LDZ2 $ZP.t2
+        JSR2 @term
+        STA2 $ZP.t3
+        LDA2 $ZP.s3
+        LDA2 $ZP.t3
+        ADD2
+        STA2 $ZP.s3
+
+        LDA2 $ZP.angC
+        JSR2 @cos
+        STA2 $ZP.t2
+        LDA2 $ZP.r1
+        LDZ2 $ZP.t2
+        JSR2 @term
+        STA2 $ZP.s4
+
+        LDA2 $ZP.angC
+        JSR2 @sin
+        STA2 $ZP.t2
+        LDA2 $ZP.s1
+        LDZ2 $ZP.t2
+        JSR2 @term
+        STA2 $ZP.t3
+        LDA2 $ZP.s4
+        LDA2 $ZP.t3
+        SUB2
+        STA2 $ZP.s4
+
+        ; Depth, then away: x3, y3, z2, depth at four shorts a corner.
+        LDA2 $ZP.s2
+        LIT2 @CAMERA
+        ADD2
+        STA2 $ZP.z
+
+        ; Four shorts a corner, so eight bytes: the base is the index times
+        ; eight. Scaling by two walks half a record per corner, which lands the
+        ; reads in the middle of a neighbour and quietly produces nonsense.
+        LDZ2 $ZP.ci
+        LIT2 $0008
+        MUL2
+        LIT2 @rot
+        ADD2
+        STA2 $ZP.t1
+
+        ; Four plain stores, each with its own pointer, rather than one clever
+        ; one: a bare STA2 takes the address from the stack, so the address is
+        ; pushed again for every short.
+        LDA2 $ZP.s3
+        LDZ2 $ZP.t1
+        STA2
+        LDA2 $ZP.s4
+        LDZ2 $ZP.t1
+        LIT2 $0002
+        ADD2
+        STA2
+        LDA2 $ZP.s2
+        LDZ2 $ZP.t1
+        LIT2 $0004
+        ADD2
+        STA2
+        LDA2 $ZP.z
+        LDZ2 $ZP.t1
+        LIT2 $0006
+        ADD2
+        STA2
+        JMP2r2
+        DW $0000,$0002,$0003,$0005,$0006,$0008,$0009,$000b
+        DW $000c,$000e,$0010,$0011,$0013,$0014,$0016,$0017
+        DW $0018,$001a,$001b,$001d,$001e,$0020,$0021,$0022
+        DW $0024,$0025,$0026,$0027,$0029,$002a,$002b,$002c
+        DW $002d,$002e,$002f,$0030,$0031,$0032,$0033,$0034
+        DW $0035,$0036,$0037,$0038,$0038,$0039,$003a,$003b
+        DW $003b,$003c,$003c,$003d,$003d,$003e,$003e,$003e
+        DW $003f,$003f,$003f,$0040,$0040,$0040,$0040,$0040
+        DW $0040,$0040,$0040,$0040,$0040,$0040,$003f,$003f
+        DW $003f,$003e,$003e,$003e,$003d,$003d,$003c,$003c
+        DW $003b,$003b,$003a,$0039,$0038,$0038,$0037,$0036
+        DW $0035,$0034,$0033,$0032,$0031,$0030,$002f,$002e
+        DW $002d,$002c,$002b,$002a,$0029,$0027,$0026,$0025
+        DW $0024,$0022,$0021,$0020,$001e,$001d,$001b,$001a
+        DW $0018,$0017,$0016,$0014,$0013,$0011,$0010,$000e
+        DW $000c,$000b,$0009,$0008,$0006,$0005,$0003,$0002
+        DW $0000,$fffe,$fffd,$fffb,$fffa,$fff8,$fff7,$fff5
+        DW $fff4,$fff2,$fff0,$ffef,$ffed,$ffec,$ffea,$ffe9
+        DW $ffe8,$ffe6,$ffe5,$ffe3,$ffe2,$ffe0,$ffdf,$ffde
+        DW $ffdc,$ffdb,$ffda,$ffd9,$ffd7,$ffd6,$ffd5,$ffd4
+        DW $ffd3,$ffd2,$ffd1,$ffd0,$ffcf,$ffce,$ffcd,$ffcc
+        DW $ffcb,$ffca,$ffc9,$ffc8,$ffc8,$ffc7,$ffc6,$ffc5
+        DW $ffc5,$ffc4,$ffc4,$ffc3,$ffc3,$ffc2,$ffc2,$ffc2
+        DW $ffc1,$ffc1,$ffc1,$ffc0,$ffc0,$ffc0,$ffc0,$ffc0
+        DW $ffc0,$ffc0,$ffc0,$ffc0,$ffc0,$ffc0,$ffc1,$ffc1
+        DW $ffc1,$ffc2,$ffc2,$ffc2,$ffc3,$ffc3,$ffc4,$ffc4
+        DW $ffc5,$ffc5,$ffc6,$ffc7,$ffc8,$ffc8,$ffc9,$ffca
+        DW $ffcb,$ffcc,$ffcd,$ffce,$ffcf,$ffd0,$ffd1,$ffd2
+        DW $ffd3,$ffd4,$ffd5,$ffd6,$ffd7,$ffd9,$ffda,$ffdb
+        DW $ffdc,$ffde,$ffdf,$ffe0,$ffe2,$ffe3,$ffe5,$ffe6
+        DW $ffe8,$ffe9,$ffea,$ffec,$ffed,$ffef,$fff0,$fff2
+        DW $fff4,$fff5,$fff7,$fff8,$fffa,$fffb,$fffd,$fffe
+; ------------------------------------------------------------- projection
+;
+; Corner $ZP.vi in, two shorts written to the screen table.
+
+@project
+        JSR2 @takei
+        ; Four shorts a corner, so eight bytes: the base is the index times
+        ; eight. Scaling by two walks half a record per corner, which lands the
+        ; reads in the middle of a neighbour and quietly produces nonsense.
+        LDZ2 $ZP.ci
+        LIT2 $0008
+        MUL2
+        LIT2 @rot
+        ADD2
+        STA2 $ZP.t1
+
+        LDZ2 $ZP.t1
+        LDA2
+        STA2 $ZP.s1
+        LDZ2 $ZP.t1
+        LIT2 $0002
+        ADD2
+        LDA2
+        STA2 $ZP.s2
+        LDZ2 $ZP.t1
+        LIT2 $0006
+        ADD2
+        LDA2
+        STA2 $ZP.z
+
+        ; screen x = 160 + (x * 190) / depth
+        LDA2 $ZP.s1
+        LIT2 @KPROJ
+        JSR2 @smul
+        JSR2 @sdiv
+        STA2 $ZP.s3
+        LDA2 $ZP.s3
+        LIT2 $00a0
+        ADD2
+        STA2 $ZP.s3
+
+        ; screen y = 100 + (y * 190) / depth
+        LDA2 $ZP.s2
+        LIT2 @KPROJ
+        JSR2 @smul
+        JSR2 @sdiv
+        STA2 $ZP.s4
+        LDA2 $ZP.s4
+        LIT2 $0064
+        ADD2
+        STA2 $ZP.s4
+
+        ; Two shorts a corner, so four bytes: same stride rule as @rot above.
+        LDZ2 $ZP.ci
+        LIT2 $0004
+        MUL2
+        LIT2 @scr
+        ADD2
+        STA2 $ZP.t1
+
+        LDA2 $ZP.s3
+        LDZ2 $ZP.t1
+        STA2
+        LDA2 $ZP.s4
+        LDZ2 $ZP.t1
+        LIT2 $0002
+        ADD2
+        STA2
+        JMP2r2
+
+; Divide a signed short by the depth in $ZP.z. The depth is turned z plus the
+; camera distance, so it is always positive and the divide itself is unsigned;
+; only the numerator needs its sign carried.
+@sdiv
+        STA2 $ZP.tmp
+        LDZ $ZP.tmph
+        LIT $80
+        AND
+        JNZ @sdiv-neg
+        LDZ2 $ZP.tmp
+        LDZ2 $ZP.z
+        DIV2
+        JMP2r2
+@sdiv-neg
+        LDA2 $ZP.tmp
+        JSR2 @negate
+        STA2 $ZP.tmp
+        LDZ2 $ZP.tmp
+        LDZ2 $ZP.z
+        DIV2
+        STA2 $ZP.tmp
+        LDA2 $ZP.tmp
+        JSR2 @negate
+        JMP2r2
+
+; ---------------------------------------------------------------- the faces
+
+; Average the four depths of each face into the key table, so the order can be
+; decided. Only the order depends on it, so an average is plenty.
+@face-depths
+        ; The corner index is a byte but the address it offsets is a short, so
+        ; it is widened before it is added. A byte ADD here leaves the high half
+        ; of the address on the stack and adds into its low half, so every one of
+        ; the four depths comes from a truncated address - which is in bounds,
+        ; assembles clean, and leaves all six keys zero. The sort then has
+        ; nothing to order and repaints face zero six times, so the cube comes
+        ; out as one flat silhouette in a single colour.
+        LIT $00
+        STA $ZP.i
+@fd
+        LIT2 $0000
+        STA2 $ZP.k
+        LIT $00
+        STA $ZP.i2
+@fd-corner
+        LDZ $ZP.i
+        JSR2 @wide
+        LIT $20
+        SFT2
+        LIT2 @faces
+        ADD2
+        LDZ $ZP.i2
+        JSR2 @wide
+        ADD2
+        LDA
+        STA $ZP.j
+
+        ; depth of corner j, from the turned table
+        LDZ $ZP.j
+        LIT $30
+        SFT
+        JSR2 @wide
+        LIT2 @rot
+        ADD2
+        LIT2 $0006
+        ADD2
+        LDA2
+        STA2 $ZP.t1
+
+        ; Keep the farthest of the four corners, not the mean. A face seen at a
+        ; slant has corners a long way apart in depth, and averaging them puts
+        ; it in front of a face it should sit behind, which shows up as speckle
+        ; where the two overlap. For a convex solid the farthest point decides.
+        LDA2 $ZP.k
+        LDA2 $ZP.t1
+        LTH2
+        JNZ @fd-take
+        JMP @fd-advance
+@fd-take
+        LDA2 $ZP.t1
+        STA2 $ZP.k
+@fd-advance
+        LDZ $ZP.i2
+        LIT $01
+        ADD
+        STA $ZP.i2
+        LDZ $ZP.i2
+        LIT $04
+        LTH
+        JNZ @fd-corner
+
+        LDA2 $ZP.k
+        STA2 $ZP.t2
+
+        LDA2 $ZP.t2
+        LDZ $ZP.i
+        JSR2 @wide
+        LIT $10
+        SFT2
+        LIT2 @keys
+        ADD2
+        STA2
+
+        LDZ $ZP.i
+        LIT $01
+        ADD
+        STA $ZP.i
+        LDZ $ZP.i
+        LIT $06
+        LTH
+        JNZ @fd
+        JMP2r2
+
+; Fill face $ZP.j. The four corners are in cyclic order, so the two opposite
+; edges can each be walked in step and the spans between them fill the quad.
+@fill
+        ; The four corners of a face, in cyclic order, read straight into the
+        ; screen slots: A into ax/ay, B into s1/s2, C into s3/s4, D into dax/day.
+        ; Corner A of the cycle.
+        LDZ $ZP.j
+        JSR2 @wide
+        LIT $20
+        SFT2
+        LIT2 @faces
+        ADD2
+        LDA
+        JSR2 @seti2
+        JSR2 @getsx
+        STA2 $ZP.ax
+        JSR2 @getsy
+        STA2 $ZP.ay
+
+        LDZ $ZP.j
+        JSR2 @wide
+        LIT $20
+        SFT2
+        LIT2 @faces
+        ADD2
+        LIT $01
+        ADD
+        LDA
+        JSR2 @seti2
+        JSR2 @getsx
+        STA2 $ZP.s1
+        JSR2 @getsy
+        STA2 $ZP.s2
+
+        LDZ $ZP.j
+        JSR2 @wide
+        LIT $20
+        SFT2
+        LIT2 @faces
+        ADD2
+        LIT $02
+        ADD
+        LDA
+        JSR2 @seti2
+        JSR2 @getsx
+        STA2 $ZP.s3
+        JSR2 @getsy
+        STA2 $ZP.s4
+
+        LDZ $ZP.j
+        JSR2 @wide
+        LIT $20
+        SFT2
+        LIT2 @faces
+        ADD2
+        LIT $03
+        ADD
+        LDA
+        JSR2 @seti2
+        JSR2 @getsx
+        STA2 $ZP.dax
+        JSR2 @getsy
+        STA2 $ZP.day
+
+        ; The two edges a span crosses: A to B, and D to C. Keeping them as
+        ; vectors rather than as per-step deltas is the whole trick. A delta
+        ; per step has to be a whole pixel, so on an edge that is not a multiple
+        ; of SPANS it truncates to one or nought, and the fan of spans stops
+        ; short of the far corner and leaves a wedge instead of a quad.
+        LDA2 $ZP.s1
+        LDA2 $ZP.ax
+        SUB2
+        STA2 $ZP.e1x
+        LDA2 $ZP.s2
+        LDA2 $ZP.ay
+        SUB2
+        STA2 $ZP.e1y
+        LDA2 $ZP.s3
+        LDA2 $ZP.dax
+        SUB2
+        STA2 $ZP.e2x
+        LDA2 $ZP.s4
+        LDA2 $ZP.day
+        SUB2
+        STA2 $ZP.e2y
+
+        ; One span per pixel of whichever edge is longer, so consecutive spans are
+        ; never more than a pixel apart. Longer means the larger of the two
+        ; steps in x and in y, not the larger step in x alone: a face seen from
+        ; the side is tall and narrow, so its x steps are a couple of pixels
+        ; while it is ninety rows deep. Counting on x alone gives it three spans
+        ; where it needs ninety, and the face comes out as three stray lines.
+        LDA2 $ZP.e1x
+        JSR2 @abs2
+        LDA2 $ZP.e1y
+        JSR2 @abs2
+        JSR2 @bigger
+        STA2 $ZP.n
+        LDA2 $ZP.e2x
+        JSR2 @abs2
+        LDA2 $ZP.e2y
+        JSR2 @abs2
+        JSR2 @bigger
+        LDA2 $ZP.n
+        JSR2 @bigger
+        STA2 $ZP.n
+        LDA2 $ZP.n
+        LIT2 $0002
+        MUL2
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.n
+
+        ; The columns to fill: from the leftmost corner to the rightmost. The
+        ; four corners are all candidates and the answer is the min and the max,
+        ; so this is four @small and four @bigger calls over the same four shorts.
+        LDA2 $ZP.ax
+        STA2 $ZP.xmin
+        LDA2 $ZP.ax
+        STA2 $ZP.xmax
+        LDA2 $ZP.xmin
+        LDA2 $ZP.s1
+        JSR2 @small
+        STA2 $ZP.xmin
+        LDA2 $ZP.xmax
+        LDA2 $ZP.s1
+        JSR2 @bigger
+        STA2 $ZP.xmax
+        LDA2 $ZP.xmin
+        LDA2 $ZP.s3
+        JSR2 @small
+        STA2 $ZP.xmin
+        LDA2 $ZP.xmax
+        LDA2 $ZP.s3
+        JSR2 @bigger
+        STA2 $ZP.xmax
+        LDA2 $ZP.xmin
+        LDA2 $ZP.dax
+        JSR2 @small
+        STA2 $ZP.xmin
+        LDA2 $ZP.xmax
+        LDA2 $ZP.dax
+        JSR2 @bigger
+        STA2 $ZP.xmax
+        LDA2 $ZP.xmin
+        STA2 $ZP.colx
+
+        ; Colour per face, so the six planes are told apart at a glance.
+        LDZ $ZP.j
+        JSR2 @wide
+        LIT $20
+        SFT2
+        LIT2 @faces
+        ADD2
+        LDA
+        JSR2 @facecolour
+        STA $ZP.colour
+
+        ; One span per step of the index, each placed at A + (B-A)*i/SPANS and
+        ; D + (C-D)*i/SPANS. The multiply is exact, so consecutive spans land
+        ; one pixel apart on the longer edge and the fill comes out solid.
+        LIT $00
+        STA $ZP.sp
+
+; One span a step. Each is a chord from a point on the A-to-B edge to the same
+; fraction of the way along the D-to-C edge, which for a convex quad fills it
+; without the chords ever crossing.
+@fill-loop
+        LDZ2 $ZP.colx
+        STA2 $ZP.xw
+
+        ; Start with the range empty. Two edges of a convex quad always cross a
+        ; column between the leftmost and the rightmost corner, but starting
+        ; empty and letting the edges widen it means a column nothing reaches
+        ; draws nothing, rather than plotting a line right across the screen.
+        ;
+        ; The seeds are the extremes of an UNSIGNED compare: $7fff above any row
+        ; and $0000 below any. They cannot be $7fff and $8000, because $8000 is
+        ; -32768 signed and 32768 unsigned, which is above every row, so the
+        ; bottom of the run would never come down and the face would draw
+        ; nothing. GTH2 and LTH2 do not look at the sign bit.
+        LIT2 $7fff
+        STA2 $ZP.lo
+        LIT2 $0000
+        STA2 $ZP.hi
+
+        LDA2 $ZP.ax
+        STA2 $ZP.px2
+        LDA2 $ZP.ay
+        STA2 $ZP.py2
+        LDA2 $ZP.s1
+        STA2 $ZP.ex2
+        LDA2 $ZP.s2
+        STA2 $ZP.ey2
+        JSR2 @edgey
+
+        LDA2 $ZP.s1
+        STA2 $ZP.px2
+        LDA2 $ZP.s2
+        STA2 $ZP.py2
+        LDA2 $ZP.s3
+        STA2 $ZP.ex2
+        LDA2 $ZP.s4
+        STA2 $ZP.ey2
+        JSR2 @edgey
+
+        LDA2 $ZP.s3
+        STA2 $ZP.px2
+        LDA2 $ZP.s4
+        STA2 $ZP.py2
+        LDA2 $ZP.dax
+        STA2 $ZP.ex2
+        LDA2 $ZP.day
+        STA2 $ZP.ey2
+        JSR2 @edgey
+
+        LDA2 $ZP.dax
+        STA2 $ZP.px2
+        LDA2 $ZP.day
+        STA2 $ZP.py2
+        LDA2 $ZP.ax
+        STA2 $ZP.ex2
+        LDA2 $ZP.ay
+        STA2 $ZP.ey2
+        JSR2 @edgey
+
+        ; Draw the column, if the edges found a range at all.
+        LDA2 $ZP.lo
+        LDA2 $ZP.hi
+        LTH2
+        JNZ @fill-col
+
+        LDA2 $ZP.colx
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.colx
+        LDZ2 $ZP.colx
+        LDA2 $ZP.xmax
+        LTH2
+        JNZ @fill-loop
+        JMP2r2
+
+@fill-col
+        LDA2 $ZP.xw
+        STA2 $ZP.px2
+        LDA2 $ZP.lo
+        STA2 $ZP.py2
+        LDA2 $ZP.xw
+        STA2 $ZP.ex2
+        LDA2 $ZP.hi
+        STA2 $ZP.ey2
+        JSR2 @line
+
+        LDA2 $ZP.colx
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.colx
+        LDZ2 $ZP.colx
+        LDA2 $ZP.xmax
+        LTH2
+        JNZ @fill-loop
+        JMP2r2
+
+; Leave the smaller of two shorts.
+@small
+        STA2 $ZP.big
+        STA2 $ZP.tmp
+        LDA2 $ZP.tmp
+        LDA2 $ZP.big
+        LTH2
+        JNZ @small-take
+        LDA2 $ZP.big
+        JMP2r2
+@small-take
+        LDA2 $ZP.tmp
+        JMP2r2
+
+; Leave the larger of two shorts.
+@bigger
+        STA2 $ZP.big
+        STA2 $ZP.tmp
+        LDA2 $ZP.tmp
+        LDA2 $ZP.big
+        GTH2
+        JNZ @bigger-take
+        LDA2 $ZP.big
+        JMP2r2
+@bigger-take
+        LDA2 $ZP.tmp
+        JMP2r2
+
+; Take the corner index off the stack into $ZP.ci. It arrives as one byte and
+; lives as a short, so the high byte is cleared rather than left holding the low
+; half of whatever the last index was.
+@takei
+        STA $ZP.cilo
+        LIT $00
+        STA $ZP.ci
+        JMP2r2
+
+; The same, for an index already on the stack as a byte.
+@seti2
+        STA $ZP.cilo
+        LIT $00
+        STA $ZP.ci
+        JMP2r2
+
+; The screen x and y of corner $ZP.ci, one at a time. Neither consumes anything
+; from the stack and each leaves one short. Two shorts a corner, so four bytes.
+@getsx
+        LDZ2 $ZP.ci
+        LIT $20
+        SFT2
+        LIT2 @scr
+        ADD2
+        LDA2
+        JMP2r2
+@getsy
+        LDZ2 $ZP.ci
+        LIT $20
+        SFT2
+        LIT2 @scr
+        ADD2
+        LIT2 $0002
+        ADD2
+        LDA2
+        JMP2r2
+
+; Where the edge in px2/py2 to ex2/ey2 crosses column $ZP.xw, put into $ZP.yv
+; and widen the run in $ZP.lo to $ZP.hi to include it. An edge that does not
+; reach the column is skipped, so this works whatever order the corners are in.
+;
+; Filling a face a column at a time rather than as a fan of chords is what makes
+; it solid. Chords a pixel apart are up to one and a half pixels apart measured
+; across them, which is a dither, and no cheap multiple of the chord count fixes
+; that without plotting the face several times over. Columns a pixel apart share
+; pixel columns, so this fill cannot leave a gap at all.
+@edgey
+        ; Order the two ends left to right, so the divisor comes out positive
+        ; and @divn can divide by it with the numerator carrying the sign.
+        LDA2 $ZP.ex2
+        LDA2 $ZP.px2
+        LTH2
+        JNZ @ey-left
+        LDA2 $ZP.px2
+        STA2 $ZP.ex0
+        LDA2 $ZP.py2
+        STA2 $ZP.ey0
+        LDA2 $ZP.ex2
+        STA2 $ZP.ex1
+        LDA2 $ZP.ey2
+        STA2 $ZP.ey1
+        JMP @ey-span
+@ey-left
+        LDA2 $ZP.ex2
+        STA2 $ZP.ex0
+        LDA2 $ZP.ey2
+        STA2 $ZP.ey0
+        LDA2 $ZP.px2
+        STA2 $ZP.ex1
+        LDA2 $ZP.py2
+        STA2 $ZP.ey1
+@ey-span
+        LDA2 $ZP.xw
+        LDA2 $ZP.ex0
+        LTH2
+        JNZ @ey-skip
+        LDA2 $ZP.ex1
+        LDA2 $ZP.xw
+        LTH2
+        JNZ @ey-skip
+
+        LDA2 $ZP.ex1
+        LDA2 $ZP.ex0
+        SUB2
+        STA2 $ZP.n
+        LDA2 $ZP.xw
+        LDA2 $ZP.ex0
+        SUB2
+        LDA2 $ZP.ey1
+        LDA2 $ZP.ey0
+        SUB2
+        JSR2 @smul
+        JSR2 @divn
+        LDA2 $ZP.ey0
+        ADD2
+        STA2 $ZP.yv
+
+        ; Clamp to the screen. The run is tracked with unsigned compares, so a
+        ; crossing off the top or bottom of the frame is a huge unsigned number
+        ; and would stretch the column right off the display.
+        LDZ $ZP.yvh
+        LIT $80
+        AND
+        JNZ @ey-clamp
+        LDA2 $ZP.yv
+        LIT2 $00c7
+        LTH2
+        JNZ @ey-fold
+@ey-clamp
+        LDA2 $ZP.yv
+        LIT2 $0000
+        LTH2
+        JNZ @ey-fold
+        LDA2 $ZP.yv
+        JSR2 @negate
+        JMP2r2
+@ey-fold
+
+        ; Widen the run to include this crossing. Done with @small and @bigger
+        ; rather than a pair of LTH2 tests: the run starts empty at $7fff for the
+        ; top and $8000 for the bottom, and which way those compares go has to
+        ; be right for the first crossing as well as the rest. Min and max do
+        ; not care.
+        LDA2 $ZP.lo
+        LDA2 $ZP.yv
+        JSR2 @small
+        STA2 $ZP.lo
+        LDA2 $ZP.hi
+        LDA2 $ZP.yv
+        JSR2 @bigger
+        STA2 $ZP.hi
+        JMP2r2
+@ey-skip
+        JMP2r2
+
+; Divide a signed short by the span count in $ZP.n. The count is a runtime
+; value, so this cannot be the fixed-divisor @divspans, and it has to be the
+; same number the loop counts to: scaling by anything else leaves each edge
+; stopping at a different fraction of the way and the quad comes out sheared.
+@divn
+        STA2 $ZP.tmp
+        LDZ $ZP.tmph
+        LIT $80
+        AND
+        JNZ @divn-neg
+        LDZ2 $ZP.tmp
+        LDZ2 $ZP.n
+        DIV2
+        JMP2r2
+@divn-neg
+        LDA2 $ZP.tmp
+        JSR2 @negate
+        STA2 $ZP.tmp
+        LDZ2 $ZP.tmp
+        LDZ2 $ZP.n
+        DIV2
+        STA2 $ZP.tmp
+        LDA2 $ZP.tmp
+        JSR2 @negate
+        JMP2r2
+
+; Divide a signed short by SPANS.
+@divspans
+        STA2 $ZP.tmp
+        LDZ $ZP.tmph
+        LIT $80
+        AND
+        JNZ @dsp-neg
+        LDZ2 $ZP.tmp
+        LIT2 @SPANS
+        DIV2
+        JMP2r2
+@dsp-neg
+        LDA2 $ZP.tmp
+        JSR2 @negate
+        STA2 $ZP.tmp
+        LDZ2 $ZP.tmp
+        LIT2 @SPANS
+        DIV2
+        STA2 $ZP.tmp
+        LDA2 $ZP.tmp
+        JSR2 @negate
+        JMP2r2
+
+; A colour for each face, so the planes read as planes. A table rather than a
+; sum: the palette holds three usable colours, and the obvious j-and-one plus
+; three reaches for a fourth on every other face, which the two-bit framebuffer
+; masks down to colour zero, so half the cube is painted in the background.
+@facecolour
+        ; Index the table by the face, not by the face's first corner. Going
+        ; through @faces gave faces 0, 3 and 5 one shade between them, and those
+        ; are exactly the three a cube shows from the front - so three faces were
+        ; being drawn, correctly, in the same colour, and the cube read as one
+        ; flat shape with every other check passing.
+        STA $ZP.i2
+        LDZ $ZP.j
+        JSR2 @wide
+        LIT2 @coltab
+        ADD2
+        LDA
+        JMP2r2
+
+; One colour per *axis*, so the two faces on an axis match. The opposite pairs
+; in @faces are 0 and 4, 1 and 3, 2 and 5, and no view can show both of an
+; opposite pair - so every viewpoint shows one face of each colour and the three
+; are always distinct. Grouping by face number mod three does not work: it puts
+; adjacent faces together, and those *can* be seen at once.
+@coltab
+        DB 1, 2, 3, 2, 1, 3
+
+; ---------------------------------------------------------------- lines
+
+; Bresenham from $ZP.px2,$ZP.py2 to $ZP.ex2,$ZP.ey2.
+;
+; All unsigned: the deltas are made positive first and the direction is carried
+; separately as $ffff or $0001, so stepping is a plain add. The error term is
+; biased so that both thresholds stay positive and the comparisons the machine
+; does are the ones it can do.
+@line
+        LDA2 $ZP.px2
+        STA2 $ZP.absdx
+        LDA2 $ZP.ex2
+        LDA2 $ZP.absdx
+        SUB2
+        JSR2 @abs2
+        STA2 $ZP.absdx
+
+        LDA2 $ZP.py2
+        STA2 $ZP.absdy
+        LDA2 $ZP.ey2
+        LDA2 $ZP.absdy
+        SUB2
+        JSR2 @abs2
+        STA2 $ZP.absdy
+
+        LDA2 $ZP.ex2
+        LDA2 $ZP.px2
+        LTH2
+        JNZ @line-sx-back
+        LIT2 $0001
+        STA2 $ZP.stp
+        JMP @line-sy
+@line-sx-back
+        LIT2 $ffff
+        STA2 $ZP.stp
+
+@line-sy
+        LDA2 $ZP.ey2
+        LDA2 $ZP.py2
+        LTH2
+        JNZ @line-sy-back
+        LIT2 $0001
+        STA2 $ZP.stp2
+        JMP @line-count
+@line-sy-back
+        LIT2 $ffff
+        STA2 $ZP.stp2
+
+@line-count
+        LDA2 $ZP.absdx
+        LDA2 $ZP.absdy
+        GTH2
+        JNZ @line-count-x
+        LDA2 $ZP.absdy
+        STA2 $ZP.cnt
+        JMP @line-error
+@line-count-x
+        LDA2 $ZP.absdx
+        STA2 $ZP.cnt
+
+@line-error
+        LDA2 $ZP.absdx
+        LDA2 $ZP.absdy
+        SUB2
+        LIT2 $0400
+        ADD2
+        STA2 $ZP.err
+
+@line-go
+        LDZ2 $ZP.px2
+        LDA2 $ZP.py2
+        LDZ $ZP.colour
+        JSR2 @plot
+
+        LDA2 $ZP.cnt
+        LIT2 $0000
+        GTH2
+        JNZ @line-step
+        JMP2r2
+
+@line-step
+        LDA2 $ZP.cnt
+        LIT2 $0001
+        SUB2
+        STA2 $ZP.cnt
+
+        LDA2 $ZP.err
+        LDA2 $ZP.err
+        ADD2
+        STA2 $ZP.t3
+
+        LIT2 $0800
+        LDA2 $ZP.absdy
+        SUB2
+        STA2 $ZP.t2
+        LDA2 $ZP.t2
+        LDA2 $ZP.t3
+        LTH2
+        JNZ @line-do-x
+        JMP @line-no-x
+@line-do-x
+        LDA2 $ZP.err
+        LDA2 $ZP.absdy
+        SUB2
+        STA2 $ZP.err
+        LDA2 $ZP.px2
+        LDZ2 $ZP.stp
+        ADD2
+        STA2 $ZP.px2
+@line-no-x
+
+        LDA2 $ZP.absdx
+        LIT2 $0800
+        ADD2
+        STA2 $ZP.t2
+        LDA2 $ZP.t2
+        LDA2 $ZP.t3
+        LTH2
+        JNZ @line-no-y
+        LDA2 $ZP.err
+        LDA2 $ZP.absdx
+        ADD2
+        STA2 $ZP.err
+        LDA2 $ZP.py2
+        LDZ2 $ZP.stp2
+        ADD2
+        STA2 $ZP.py2
+@line-no-y
+        JMP @line-go
+
+; Plot one pixel. Stack: x, y, colour.
+;
+; No POP here, and the measured depth says so. The three stores at the top take
+; all three values off the stack, and a probe that pushes one byte too few makes
+; the pointer wrap and report 255 - which is an underflow in the probe, not a
+; leak in this routine.
+@plot
+        STA $ZP.sgn
+        STA2 $ZP.t2
+        STA2 $ZP.t1
+        LDZ2 $ZP.t1
+        LIT $28
+        JSR2 @put16
+        LDZ2 $ZP.t2
+        LIT $2a
+        JSR2 @put16
+        LDZ $ZP.sgn
+        DEO $SCREEN.pixel
+        JMP2r2
+
+; ---------------------------------------------------------------- the erase
+
+; One flat sprite per run of sixteen pixels: a 320-pixel row is twenty calls
+; and two hundred rows is four thousand.
+;
+; Sixteen, not thirty-two. Bits 5 and 6 of the sprite port give the length in
+; bytes plus one, so the longest run it can ask for is four bytes, and that is
+; sixteen pixels at four to a byte. Stepping thirty-two stamped half of each
+; block and left the rest of the previous frame on screen. A cube covers the
+; screen so completely that nothing showed - but only because it covered it.
+@clear
+        ; Two stores, so two values: a bare STA2 takes its address from the
+        ; stack, and one LIT2 short of two leaves the second store reaching
+        ; below the bottom of the stack, once per frame.
+        LIT2 $0000
+        STA2 $ZP.row
+        LIT2 $0000
+        STA2 $ZP.col
+&cl-row
+        LDZ2 $ZP.row
+        LIT2 $00c8
+        GTH2
+        JNZ @clear-done
+
+        LDA2 $ZP.row
+        STA2 $ZP.t2
+        STA $ZP.t1 $00
+&cl-x
+        LDZ2 $ZP.t1
+        LIT2 $0140
+        GTH2
+        JNZ &cl-next
+
+        LDZ2 $ZP.t1
+        LIT $28
+        JSR2 @put16
+        LDZ2 $ZP.t2
+        LIT $2a
+        JSR2 @put16
+        LIT2 @solid
+        LIT $2c
+        JSR2 @put16
+        LIT $e0
+        DEO $SCREEN.sprite
+
+        LDZ2 $ZP.t1
+        LIT2 $0010
+        ADD2
+        STA2 $ZP.t1
+        JMP &cl-x
+&cl-next
+        LDA2 $ZP.row
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.row
+        JMP &cl-row
+@clear-done
+        JMP2r2
+
+; ------------------------------------------------------------------ helpers
+
+; A device port pair holds its high byte at the base address, so a short going
+; to a device comes through the bare form with the port off the stack.
+; Stack: value, then port. Both consumed.
+@put16
+        DEO2
+        JMP2r2
+
+; sin of the index on the stack, left on the stack. The shift control byte is
+; high nibble left, low nibble right, so doubling is $10 and halving is $01.
+@sin
+        LIT $10
+        SFT2
+        LIT2 @sintab
+        ADD2
+        LDA2
+        JMP2r2
+
+; cos of the index. A quarter turn is sixty-four steps of two hundred and
+; fifty-six, so the cosine is the sine read from sixty-four further on, and the
+; mask wraps the index back to the start of the table.
+@cos
+        LIT2 $0040
+        ADD2
+        LIT2 $00ff
+        AND2
+        JSR2 @sin
+        JMP2r2
+
+; One multiply by a table entry, already divided by sixty-four. Stack: the
+; coordinate, then the table entry.
+@term
+        JSR2 @smul
+        JSR2 @shr6
+        JMP2r2
+
+; Signed multiply. Two shorts on the stack, the product left. MUL2 is unsigned,
+; so both magnitudes are taken first and the sign put back afterwards.
+@smul
+        STA2 $ZP.t2
+        STA2 $ZP.t1
+
+        LDZ $ZP.t1h
+        LIT $80
+        AND
+        STA $ZP.sgn
+        LDZ $ZP.t2h
+        LIT $80
+        AND
+        STA $ZP.sgn2
+
+        LDA2 $ZP.t1
+        JSR2 @abs2
+        STA2 $ZP.t1
+        LDA2 $ZP.t2
+        JSR2 @abs2
+        STA2 $ZP.t2
+
+        LDZ2 $ZP.t1
+        LDZ2 $ZP.t2
+        MUL2
+        STA2 $ZP.t1
+
+        ; EQU pushes one when the flags are equal and there is no jump-if-zero,
+        ; so the branch has to be the "signs agree" one and the negation is the
+        ; fall-through. The other way round, every product by one negative
+        ; operand comes back the wrong way and the cube lands off the screen.
+        LDZ $ZP.sgn
+        LDZ $ZP.sgn2
+        EQU
+        JNZ @smul-same
+
+        LDA2 $ZP.t1
+        JSR2 @negate
+        JMP2r2
+@smul-same
+        LDA2 $ZP.t1
+        JMP2r2
+
+; Divide a signed short by sixty-four, truncating toward zero. SFT is logical,
+; so a negative value is flipped, shifted and flipped back.
+@shr6
+        STA2 $ZP.tmp
+        LDZ $ZP.tmph
+        LIT $80
+        AND
+        JNZ @shr6-neg
+        LDZ2 $ZP.tmp
+        LIT $06
+        SFT2
+        JMP2r2
+@shr6-neg
+        LDA2 $ZP.tmp
+        JSR2 @negate
+        STA2 $ZP.tmp
+        LDZ2 $ZP.tmp
+        LIT $06
+        SFT2
+        STA2 $ZP.tmp
+        LDA2 $ZP.tmp
+        JSR2 @negate
+        JMP2r2
+
+; Absolute value. The sign is bit 7 of the high byte.
+@abs2
+        STA2 $ZP.absr
+        LDZ $ZP.absrh
+        LIT $80
+        AND
+        JNZ @abs2-neg
+        LDZ2 $ZP.absr
+        JMP2r2
+@abs2-neg
+        LIT2 $0000
+        LDZ2 $ZP.absr
+        SUB2
+        JMP2r2
+
+; Widen a byte to a short. A short keeps its high byte at the lower address, so
+; the zero goes underneath and the value on top. Loop counters are bytes because
+; incrementing one is two instructions, but anything that has to be scaled for an
+; address needs a short, and this is how a byte becomes one without reading the
+; neighbouring byte as the high half and hoping it is zero.
+@wide
+        STA $7f
+        LIT $00
+        STA $7e
+        LDZ2 $7e
+        JMP2r2
+
+; Negate: there is no NEG, and 0 - x costs a stack slot this does not. Flip
+; every bit and add one.
+@negate
+        LIT2 $ffff
+        EOR2
+        LIT2 $0001
+        ADD2
+        JMP2r2
+
+; ------------------------------------------------------------------- data
+
+; Thirty-two pixels lit, which is the most a sprite reads: bits 5 and 6 both set
+; give a length of four bytes.
+@solid
+        DB $ff, $ff, $ff, $ff
+
+; sin over a whole turn in 256 steps, Q6. Sixty-four is one unit, and the index
+; is doubled for the word stride before it is added to the table address.
+@sintab
+        DW $0000,$0002,$0003,$0005,$0006,$0008,$0009,$000b
+        DW $000c,$000e,$0010,$0011,$0013,$0014,$0016,$0017
+        DW $0018,$001a,$001b,$001d,$001e,$0020,$0021,$0022
+        DW $0024,$0025,$0026,$0027,$0029,$002a,$002b,$002c
+        DW $002d,$002e,$002f,$0030,$0031,$0032,$0033,$0034
+        DW $0035,$0036,$0037,$0038,$0038,$0039,$003a,$003b
+        DW $003b,$003c,$003c,$003d,$003d,$003e,$003e,$003e
+        DW $003f,$003f,$003f,$0040,$0040,$0040,$0040,$0040
+        DW $0040,$0040,$0040,$0040,$0040,$0040,$003f,$003f
+        DW $003f,$003e,$003e,$003e,$003d,$003d,$003c,$003c
+        DW $003b,$003b,$003a,$0039,$0038,$0038,$0037,$0036
+        DW $0035,$0034,$0033,$0032,$0031,$0030,$002f,$002e
+        DW $002d,$002c,$002b,$002a,$0029,$0027,$0026,$0025
+        DW $0024,$0022,$0021,$0020,$001e,$001d,$001b,$001a
+        DW $0018,$0017,$0016,$0014,$0013,$0011,$0010,$000e
+        DW $000c,$000b,$0009,$0008,$0006,$0005,$0003,$0002
+        DW $0000,$fffe,$fffd,$fffb,$fffa,$fff8,$fff7,$fff5
+        DW $fff4,$fff2,$fff0,$ffef,$ffed,$ffec,$ffea,$ffe9
+        DW $ffe8,$ffe6,$ffe5,$ffe3,$ffe2,$ffe0,$ffdf,$ffde
+        DW $ffdc,$ffdb,$ffda,$ffd9,$ffd7,$ffd6,$ffd5,$ffd4
+        DW $ffd3,$ffd2,$ffd1,$ffd0,$ffcf,$ffce,$ffcd,$ffcc
+        DW $ffcb,$ffca,$ffc9,$ffc8,$ffc8,$ffc7,$ffc6,$ffc5
+        DW $ffc5,$ffc4,$ffc4,$ffc3,$ffc3,$ffc2,$ffc2,$ffc2
+        DW $ffc1,$ffc1,$ffc1,$ffc0,$ffc0,$ffc0,$ffc0,$ffc0
+        DW $ffc0,$ffc0,$ffc0,$ffc0,$ffc0,$ffc0,$ffc1,$ffc1
+        DW $ffc1,$ffc2,$ffc2,$ffc2,$ffc3,$ffc3,$ffc4,$ffc4
+        DW $ffc5,$ffc5,$ffc6,$ffc7,$ffc8,$ffc8,$ffc9,$ffca
+        DW $ffcb,$ffcc,$ffcd,$ffce,$ffcf,$ffd0,$ffd1,$ffd2
+        DW $ffd3,$ffd4,$ffd5,$ffd6,$ffd7,$ffd9,$ffda,$ffdb
+        DW $ffdc,$ffde,$ffdf,$ffe0,$ffe2,$ffe3,$ffe5,$ffe6
+        DW $ffe8,$ffe9,$ffea,$ffec,$ffed,$ffef,$fff0,$fff2
+        DW $fff4,$fff5,$fff7,$fff8,$fffa,$fffb,$fffd,$fffe
+
+; The eight corners, three shorts each: x, y, z. Q6, thirty-two to a side.
+@verts
+        DW $ffe0,$ffe0,$ffe0
+        DW $0020,$ffe0,$ffe0
+        DW $0020,$0020,$ffe0
+        DW $ffe0,$0020,$ffe0
+        DW $ffe0,$ffe0,$0020
+        DW $0020,$ffe0,$0020
+        DW $0020,$0020,$0020
+        DW $ffe0,$0020,$0020
+
+; Turned corners, four shorts each: x, y, z, depth. Written every frame.
+@rot
+        DW $0000,$0000,$0000,$0000
+        DW $0000,$0000,$0000,$0000
+        DW $0000,$0000,$0000,$0000
+        DW $0000,$0000,$0000,$0000
+        DW $0000,$0000,$0000,$0000
+        DW $0000,$0000,$0000,$0000
+        DW $0000,$0000,$0000,$0000
+        DW $0000,$0000,$0000,$0000
+
+; Projected corners, two shorts each: screen x, screen y.
+@scr
+        DW $0000,$0000, $0000,$0000, $0000,$0000, $0000,$0000
+        DW $0000,$0000, $0000,$0000, $0000,$0000, $0000,$0000
+
+; Six faces, four corner indices each, in cyclic order around the face.
+;      -z        +x        +y        -x        +z        -y
+@faces
+        DB 0, 1, 2, 3
+        DB 1, 2, 6, 5
+        DB 2, 3, 7, 6
+        DB 3, 0, 4, 7
+        DB 4, 5, 6, 7
+        DB 0, 1, 5, 4
+
+; One short per face: how far away it is. Only the order depends on it.
+@keys
+        DW $0000,$0000,$0000,$0000,$0000,$0000

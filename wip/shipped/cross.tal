@@ -1,0 +1,64 @@
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        LIT2 $0000
+        STA2 $ZP.sj
+@row
+        LIT2 $0000
+        STA2 $ZP.si
+@col
+        ; A plus: 32 columns at x 144..175, 32 rows at y 84..115, and where they
+        ; cross only one pixel of it. 32*200 + 320*32 - 32*32 = 15616.
+        ;
+        ; Each bound skips the pixels *outside* it, so the low bound is a "less
+        ; than" and the high bound is a "greater than". Written the other way
+        ; round - a greater-than on the low bound - the test skips the bar
+        ; instead of what is beside it, and the whole drawing comes out blank.
+        LDA2 $ZP.si
+        LIT2 $0090
+        LTH2
+        JNZ @try-bar
+        LDA2 $ZP.si
+        LIT2 $00af
+        GTH2
+        JNZ @try-bar
+        ; In the vertical bar, so it is already drawn. Skipping the horizontal
+        ; test is the whole point: with all four tests skipping, the predicate is
+        ; an AND and a plus sign comes out as its own centre, 32 by 32.
+        LIT $01
+        JSR2 @plotat
+        JMP @col-end
+@try-bar
+        LDA2 $ZP.sj
+        LIT2 $0054
+        LTH2
+        JNZ @col-end
+        LDA2 $ZP.sj
+        LIT2 $0073
+        GTH2
+        JNZ @col-end
+        LIT $01
+        JSR2 @plotat
+@col-end
+        LDA2 $ZP.si
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.si
+        LDA2 $ZP.si
+        LIT2 $0140
+        GTH2
+        JNZ @col-end2
+        JMP @col
+@col-end2
+        LDA2 $ZP.sj
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.sj
+        LDA2 $ZP.sj
+        LIT2 $00c8
+        GTH2
+        JNZ @row-end
+        JMP @row
+@row-end
+        JMP2r2

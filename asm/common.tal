@@ -1,0 +1,234 @@
+; common.tal - the parts every demo shares.
+;
+;   ./duxasm -o roms/thing.rom asm/thing.tal
+;   ./duxsdl roms/thing.rom
+;
+; Each program is INCLUDE this file and then supply one routine:
+;
+;   @draw      called once at reset and again every frame
+;
+; Everything else - the palette, the vector, @plot, @clear and a line - is here,
+; so a demo is the twenty lines that are actually about the demo. It also means
+; the awkward parts live in one file: @clear alone is two thousand sprite calls,
+; and getting its stack right once is worth more than getting it right thirty
+; times.
+;
+; @reset has to come first, because the assembler emits in source order and the
+; reset vector is fixed at $0200. Data goes last, and a program that needs its
+; own tables puts them after this file.
+
+; --------------------------------------------------------------- devices
+
+@SCREEN.vector = $20
+@SCREEN.x      = $28
+@SCREEN.y      = $2a
+@SCREEN.addr   = $2c
+@SCREEN.pixel  = $2e
+@SCREEN.sprite = $2f
+
+@PAL.c0 = $40
+@PAL.c1 = $42
+@PAL.c2 = $44
+@PAL.c3 = $46
+
+@CONSOLE.high    = $1a
+@CONSOLE.number  = $1c
+@CONSOLE.send    = $18
+@CONSOLE.newline = $1e
+
+; ------------------------------------------------------------- zero page
+;
+; Bytes first, then shorts on even boundaries. A short holds its high byte at
+; the lower address.
+
+@ZP.c   = $10      ; one pixel's colour
+@ZP.rx  = $1a      ; @plot's coordinates
+@ZP.ry  = $1c
+@ZP.i   = $12      ; loop counters
+@ZP.j   = $13
+@ZP.k   = $14
+@ZP.sh  = $15      ; and its high half, for a shift count
+@ZP.shhi = $15
+@ZP.m    = $11      ; the inner-inner loop of a filled block
+@ZP.band = $19      ; which band a drawing is in (NOT $17: that is
+                      ; the high half of $ZP.fc, which @clear rewrites)
+@ZP.t    = $18      ; one scratch byte, usually a colour
+@ZP.fc  = $16      ; the row counter while clearing
+@ZP.ex  = $1e
+@ZP.ey  = $20
+@ZP.si  = $22      ; short loop counters: a byte cannot count to 320
+@ZP.sj  = $24
+@ZP.u   = $26      ; a second scratch byte
+
+; ------------------------------------------------------------------ reset
+
+@reset
+        ; A ground that is nearly black, then three that stay apart: the demos
+        ; put text and thin lines on top, and those need something to read
+        ; against.
+        LIT2 $0000
+        LIT $PAL.c0
+        JSR2 @put16
+        LIT2 $0fff
+        LIT $PAL.c1
+        JSR2 @put16
+        LIT2 $0999
+        LIT $PAL.c2
+        JSR2 @put16
+        LIT2 $0555
+        LIT $PAL.c3
+        JSR2 @put16
+
+        ; The vector goes in through the port, not through STA2: the vector
+        ; lives at $0120 in the device page, and STA2 $20 would write zero page.
+        LIT2 @on-frame
+        LIT $SCREEN.vector
+        JSR2 @put16
+
+        ; One frame now, so there is something on screen before the first tick.
+        JSR2 @draw
+
+        ; The reset vector is not called, so it ends in BRK. JMP2r2 would pop a
+        ; return address off a return stack that is empty here.
+        BRK
+
+@on-frame
+        JSR2 @draw
+        BRK
+
+; --------------------------------------------------------------- drawing
+
+; Stack: x, y, colour. All consumed.
+@plot
+        STA $ZP.c
+        STA2 $ZP.ry
+        STA2 $ZP.rx
+        LDZ2 $ZP.rx
+        LIT $SCREEN.x
+        JSR2 @put16
+        LDZ2 $ZP.ry
+        LIT $SCREEN.y
+        JSR2 @put16
+        LDZ $ZP.c
+        DEO $SCREEN.pixel
+        JMP2r2
+
+; Narrow a short on the stack to the one byte a branch wants.
+;
+; ADD2 AND2 MUL2 ORA2 EOR2 push a *short*; GTH2 LTH2 EQU push a single byte
+; flag. Branching straight off the short form therefore eats the low half and
+; leaves the high half behind, once a pixel, and a working stack that creeps up
+; one byte at a time ends up somewhere else entirely. So: narrow first.
+;
+;   LDA2 $ZP.si
+;   LIT2 $000f
+;   AND2
+;   JSR2 @toflag
+;   JNZ @skip
+@toflag
+        STA $ZP.t
+        POP
+        LDZ $ZP.t
+        JMP2r2
+
+; Plot at the loop counters rather than at $ZP.rx/$ZP.ry. Stack: the colour.
+;
+; A tail call, so this costs the caller nothing extra and cannot get out of step
+; with @plot: there is one place that turns a pixel into a device write.
+@plotat
+        STA $ZP.t
+        LDA2 $ZP.si
+        STA2 $ZP.rx
+        LDA2 $ZP.sj
+        STA2 $ZP.ry
+        LDZ2 $ZP.rx
+        LDZ2 $ZP.ry
+        LDZ $ZP.t
+        JMP2 @plot
+
+; Erase with one flat sprite per run of SIXTEEN pixels: twenty a row, two
+; hundred rows, four thousand calls. That is a lot, but it happens once a frame
+; and each call is a handful of instructions.
+;
+; Sixteen, not thirty-two: bits 5 and 6 of the sprite port give the length in
+; bytes plus one, so the longest run the port can ask for is four bytes, which
+; is sixteen pixels at four to a byte. Stepping thirty-two instead left the
+; right half of every block on screen - invisible in a still picture, because
+; the next frame redraws the same pixels over it, and glaring in anything that
+; moves, where the old pixels should have gone.
+@clear
+        STA2 $ZP.fc $0000
+&cl-row
+        LDZ2 $ZP.fc
+        LIT2 $00c8
+        GTH2
+        JNZ @clear-done
+        LDA2 $ZP.fc
+        STA2 $ZP.ry
+        STA2 $ZP.rx $0000
+&cl-x
+        LDZ2 $ZP.rx
+        LIT2 $0140
+        GTH2
+        JNZ &cl-next
+        LDZ2 $ZP.rx
+        LIT $SCREEN.x
+        JSR2 @put16
+        LDZ2 $ZP.ry
+        LIT $SCREEN.y
+        JSR2 @put16
+        LIT2 &solid
+        LIT $SCREEN.addr
+        JSR2 @put16
+        LIT $e0             ; flat, colour 0: this is the erase
+        DEO $SCREEN.sprite
+        LDZ2 $ZP.rx
+        LIT2 $0010
+        ADD2
+        STA2 $ZP.rx
+        JMP &cl-x
+&cl-next
+        LDA2 $ZP.fc
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.fc
+        JMP &cl-row
+@clear-done
+        JMP2r2
+
+; Stack: one byte, left as a short. Loop counters are bytes because stepping
+; one is two instructions, but @plot wants shorts, and widening here keeps the
+; two uses apart instead of storing one half of a short over the other.
+@widen
+        STA $7f
+        LIT $00
+        STA $7e
+        LDZ2 $7e
+        JMP2r2
+
+; Print the short on the stack, then a comma. Handy for a demo that wants to
+; say what it is doing.
+@show
+        LIT $CONSOLE.high
+        DEO2
+        LIT $01
+        DEO $CONSOLE.number
+        LIT $2c
+        DEO $CONSOLE.send
+        JMP2r2
+
+; --------------------------------------------------------------- device io
+
+; A device port pair holds its high byte at the base address, so a short going
+; to a device comes through the bare form with the port off the stack.
+; Stack: value, then port. Both consumed - three bytes in all.
+@put16
+        DEO2
+        JMP2r2
+
+; ------------------------------------------------------------------- data
+
+; 32 pixels lit, which is the most a sprite reads: bits 5 and 6 both set give a
+; length of four bytes.
+@solid
+        DB $ff, $ff, $ff, $ff

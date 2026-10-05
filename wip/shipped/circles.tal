@@ -1,0 +1,226 @@
+; circles.tal - three concentric circle outlines
+;
+;   ./duxasm -o roms/circles.rom asm/circles.tal
+;   ./duxsdl roms/circles.rom
+;
+; Rings of radius 98, 66 and 34 about (160,100), in colour 1, 2 and 3.
+;
+; There is no divide and no square root in this program. For each column across
+; the radius, y is the largest integer with x*x + y*y <= R*R, found by walking y
+; down by one until the column fits - and y only ever goes down, so the whole
+; ring costs about twice the radius rather than twice its area. One (x, y) stands
+; for eight points, the four from x and the four from y, which is what closes the
+; figure into a ring.
+;
+; The top of a column can drop by more than one between neighbours, which would
+; leave a gap in the outline, so a column is drawn as the run from its own top
+; down to the top of the next one. Every ring is then 4-connected all the way
+; round: the only pixels with a single lit neighbour are the four on the axes,
+; where the two halves of the symmetry meet.
+;
+; Zero page: $22 the radius, $24 R*R, $28 the top of this column, $2e the top of
+; the next, $30 x+1, $34 the run
+; counter, $36/$38 the pair @ring8 plots, $7a the column counter in bytes, $7b
+; the colour, $7c the radius as a byte for the loop test.
+
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        LIT2 $0062              ; 98
+        STA2 $22
+        LDA $23                 ; the low half, for the byte loop test
+        STA $7c
+        LIT $01
+        STA $7b
+@ring
+        LDA2 $22
+        STA2 $24
+        LDZ2 $24
+        LDZ2 $24
+        MUL2
+        STA2 $26                ; R*R
+        LDA2 $22
+        STA2 $28                ; the first column is the full radius
+        LIT $00
+        STA $7a                 ; the column counter starts again for each ring
+@col
+        ; ynext = the largest y with (x+1)^2 + y*y <= R*R, starting from this
+        ; column's top and stopping at zero so the last column cannot run off.
+        LDA2 $28
+        STA2 $2e
+        LDZ $7a
+        JSR2 @widen
+        STA2 $36                ; x as a short, which is what @ring8 wants
+        LDA2 $36                ; and back again: ADD2 pops four bytes, and
+        LIT2 $0001              ; the store above left the stack empty
+        ADD2
+        STA2 $30
+&yn
+        LDZ2 $30
+        LDZ2 $30
+        MUL2                   ; (x+1)^2
+        LDZ2 $2e
+        LDZ2 $2e
+        MUL2                   ; y*y
+        ADD2                   ; the column must fit or y has to come down
+        LDA2 $26
+        GTH2                    ; (x+1)^2 + y*y > R*R ?
+        JNZ &yn-dec
+        JMP &yn-done
+&yn-dec
+        LDA2 $2e
+        LIT2 $0000
+        GTH2                    ; a column left to give?
+        JNZ &yn-step
+        JMP &yn-done            ; the floor is zero, so stop here
+&yn-step
+        LDA2 $2e
+        LIT2 $0001
+        SUB2
+        STA2 $2e
+        JMP &yn
+&yn-done
+        ; the run: k from ynext up to this column's top
+        LDA2 $2e
+        STA2 $34
+&run
+        LDA2 $34
+        LDA2 $28
+        GTH2                    ; k > the top?
+        JNZ @col-end
+        LDA2 $36
+        LDA2 $34
+        LDZ $7b
+        JSR2 @ring8
+        LDA2 $34
+        LIT2 $0001
+        ADD2                   ; k climbs to this column's top and stops there
+        STA2 $34
+        JMP &run
+@col-end
+        LDA2 $2e
+        STA2 $28
+        LDZ $7a
+        LIT $01
+        ADD
+        STA $7a
+        LDZ $7a
+        LDZ $7c
+        GTH                     ; column past the radius?
+        JNZ @ring-end
+        JMP @col
+@ring-end
+        LDZ $7b
+        LIT $01
+        ADD
+        STA $7b
+        LDA2 $22
+        LIT2 $0020              ; 32: 98, 66, 34
+        SUB2
+        STA2 $22
+        LDA $23                 ; and again, a short keeps its low half higher up
+        STA $7c
+        LDZ $7b
+        LIT $04
+        GTH                     ; past the third colour?
+        JNZ @row-end
+        JMP @ring
+@row-end
+        JMP2r2
+
+; Stack: x, k, colour. Plots the eight points one pair stands for, about
+; (160,100): four from x and four from k.
+@ring8
+        STA $ZP.t
+        STA2 $38                ; k
+        STA2 $36                ; x
+        ; (160 + x, 100 + k)
+        LDA2 $36
+        LIT2 $00a0
+        ADD2
+        STA2 $3a
+        LDA2 $38
+        LIT2 $0064
+        ADD2
+        STA2 $3c
+        LDA2 $3a
+        LDA2 $3c
+        LDZ $ZP.t
+        JSR2 @plot
+        ; (160 - x, 100 + k)
+        LIT2 $00a0
+        LDA2 $36
+        SUB2
+        STA2 $3a
+        LDA2 $3a
+        LDA2 $3c
+        LDZ $ZP.t
+        JSR2 @plot
+        ; (160 + x, 100 - k)
+        LDA2 $36
+        LIT2 $00a0
+        ADD2
+        STA2 $3a
+        LIT2 $0064
+        LDA2 $38
+        SUB2
+        STA2 $3c
+        LDA2 $3a
+        LDA2 $3c
+        LDZ $ZP.t
+        JSR2 @plot
+        ; (160 - x, 100 - k)
+        LIT2 $00a0
+        LDA2 $36
+        SUB2
+        STA2 $3a
+        LDA2 $3a
+        LDA2 $3c
+        LDZ $ZP.t
+        JSR2 @plot
+        ; (160 + k, 100 + x)
+        LDA2 $38
+        LIT2 $00a0
+        ADD2
+        STA2 $3a
+        LDA2 $36
+        LIT2 $0064
+        ADD2
+        STA2 $3c
+        LDA2 $3a
+        LDA2 $3c
+        LDZ $ZP.t
+        JSR2 @plot
+        ; (160 - k, 100 + x)
+        LIT2 $00a0
+        LDA2 $38
+        SUB2
+        STA2 $3a
+        LDA2 $3a
+        LDA2 $3c
+        LDZ $ZP.t
+        JSR2 @plot
+        ; (160 + k, 100 - x)
+        LDA2 $38
+        LIT2 $00a0
+        ADD2
+        STA2 $3a
+        LIT2 $0064
+        LDA2 $36
+        SUB2
+        STA2 $3c
+        LDA2 $3a
+        LDA2 $3c
+        LDZ $ZP.t
+        JSR2 @plot
+        ; (160 - k, 100 - x)
+        LIT2 $00a0
+        LDA2 $38
+        SUB2
+        STA2 $3a
+        LDA2 $3a
+        LDA2 $3c
+        LDZ $ZP.t
+        JSR2 @plot
+        JMP2r2

@@ -1,0 +1,50 @@
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        LIT2 $0000
+        STA2 $ZP.sj
+@row
+        LIT2 $0000
+        STA2 $ZP.si
+@col
+        ; A triangle pointing down: the row is as wide as the smaller of the row
+        ; number and the number of rows left under it. 1+2+...+100 and back down
+        ; again, so 5050 + 5050 = 10100 pixels.
+        LDA2 $ZP.si
+        LDA2 $ZP.sj
+        GTH2
+        JNZ @col-end
+        ; m = 199 - row, and the row may not be wider than that either
+        LIT2 $00c7
+        LDA2 $ZP.sj
+        SUB2
+        STA2 $ZP.ey
+        LDA2 $ZP.si
+        LDA2 $ZP.ey
+        GTH2
+        JNZ @col-end
+        LIT $01
+        JSR2 @plotat
+@col-end
+        LDA2 $ZP.si
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.si
+        LDA2 $ZP.si
+        LIT2 $0140
+        GTH2
+        JNZ @col-end2
+        JMP @col
+@col-end2
+        LDA2 $ZP.sj
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.sj
+        LDA2 $ZP.sj
+        LIT2 $00c8
+        GTH2
+        JNZ @row-end
+        JMP @row
+@row-end
+        JMP2r2

@@ -1,0 +1,148 @@
+; plaid.tal - two sets of bands, crossing
+;
+;   ./duxasm -o roms/plaid.rom asm/plaid.tal
+;   ./duxsdl roms/plaid.rom
+;
+; Bands of eight every thirty-two, one set across and one set down, laid over
+; each other in three colours: crimson where only the vertical bands are, yellow
+; where only the horizontal ones are, and blue where they cross.
+;
+; Nothing here divides. A counter that has reached the width wraps to zero, so
+; "am I inside a band" is "is my counter under eight" and the counter is all the
+; state there is. Two of the three colours have to be counted before this can be
+; predicted, and they are not equal:
+;
+;   a vertical band  : 320 / 32 = 10 of them, 80 columns
+;   a horizontal band: 200 = 6*32 + 8, so seven of them, 56 rows
+;   crossing         : 80 * 56   =  4480
+;   crimson only     : 80 * 144  = 11520
+;   yellow only      : 56 * 240  = 13440
+;
+; Zero page: $22 the row, $24 the column or the band start, $26 the column
+; inside the row, $28 x as a short; $7a the row's position in its band, $7b the
+; offset inside a vertical band, $7c the column's position in its band, $7d the colour off a crossing, and
+; $79 the colour of the pixel being placed.
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        LIT $00
+        STA $7a                 ; position within the horizontal band
+        LIT2 $0000
+        STA2 $22                ; the row
+
+@row
+        LDZ $7a
+        LIT $07
+        GTH                     ; inside a band? GTH is strict, so a
+        JNZ @no-hband
+
+        ; A band row: the whole of it is yellow, and the vertical bands cross it
+        ; in blue.
+        LIT2 $0000
+        STA2 $24                ; the column
+        LIT $00
+        STA $7c                 ; position within the vertical band
+        LIT $02
+        STA $7d                 ; yellow, off the crossings
+@hb
+        LDZ $7c
+        LIT $07
+        GTH
+        JNZ @hb-out
+        LIT $03
+        JMP @hb-go
+@hb-out
+        LDZ $7d
+@hb-go
+        STA $79
+        LDA2 $24
+        LDA2 $22
+        LDZ $79
+        JSR2 @plot
+        LDZ $7c
+        LIT $01
+        ADD
+        STA $7c
+        LDZ $7c
+        LIT $20
+        EQU                     ; reached the width?
+        JNZ @hb-wrap
+        JMP @hb-step
+@hb-wrap
+        LIT $00
+        STA $7c
+@hb-step
+        LDA2 $24
+        LIT2 $0001
+        ADD2
+        STA2 $24
+        LDA2 $24
+        LIT2 $0140
+        GTH2
+        JNZ @row-step
+        JMP @hb
+@row-step
+        JMP @next-row
+
+@no-hband
+        ; Off the horizontal bands, only the vertical ones are drawn, so this
+        ; row is ten runs of eight in crimson.
+        LIT2 $0000
+        STA2 $26                ; the start of the band
+@band
+        LIT $00
+        STA $7b
+@in-band
+        LDA2 $26
+        LDZ $7b
+        JSR2 @widen              ; ADD2 wants two shorts and this is a byte
+        ADD2
+        LDA2 $22
+        LIT $01
+        JSR2 @plot
+        LDZ $7b
+        LIT $01
+        ADD
+        STA $7b
+        LDZ $7b
+        LIT $07
+        GTH
+        JNZ @band-step
+        JMP @in-band
+@band-step
+        LDA2 $26
+        LIT2 $0020
+        ADD2
+        STA2 $26
+        LDA2 $26
+        LIT2 $0128              ; 296: past the last band, which is 288..295
+        GTH2
+        JNZ @next-row
+        JMP @band
+
+@next-row
+        LDZ $7a
+        LIT $01
+        ADD
+        STA $7a
+        LDZ $7a
+        LIT $20
+        EQU
+        JNZ @next-row-wrap
+        JMP @next-row-step
+@next-row-wrap
+        LIT $00
+        STA $7a
+@next-row-step
+        LDA2 $22
+        LIT2 $0001
+        ADD2
+        STA2 $22
+        LDA2 $22
+        LIT2 $00c7              ; 199, the last row
+        GTH2
+        JNZ @row-end
+        JMP @row
+@row-end
+        JMP2r2

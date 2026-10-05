@@ -1,0 +1,49 @@
+; probe12 - comparison directions and SUB2, by value rather than by inference.
+INCLUDE "common.tal"
+
+@draw
+        ; si = 10, sj = 5
+        LIT2 $000a
+        STA2 $ZP.si
+        LIT2 $0005
+        STA2 $ZP.sj
+        LDA2 $ZP.si
+        LDA2 $ZP.sj
+        GTH2
+        JSR2 @showb
+        LDA2 $ZP.si
+        LDA2 $ZP.sj
+        LTH2
+        JSR2 @showb
+
+        ; si = 5, sj = 10
+        LIT2 $0005
+        STA2 $ZP.si
+        LIT2 $000a
+        STA2 $ZP.sj
+        LDA2 $ZP.si
+        LDA2 $ZP.sj
+        GTH2
+        JSR2 @showb
+        LDA2 $ZP.si
+        LDA2 $ZP.sj
+        LTH2
+        JSR2 @showb
+
+        ; 160 - si, and 160 + si
+        LIT2 $00a0
+        LDA2 $ZP.si
+        SUB2
+        JSR2 @show
+        LIT2 $00a0
+        LDA2 $ZP.si
+        ADD2
+        JSR2 @show
+        JMP2r2
+
+@showb
+        STA $ZP.k
+        LDZ $ZP.k
+        JSR2 @widen
+        JSR2 @show
+        JMP2r2

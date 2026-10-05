@@ -1,0 +1,50 @@
+; wedge4.tal - a wedge forty pixels wide, widening from the top-left corner until
+; it reaches full width and then staying there.
+
+;   ./duxasm -o roms/wedge4.rom asm/wedge4.tal
+;   ./duxsdl roms/wedge4.rom
+;
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        LIT2 $0000
+        STA2 $ZP.sj
+@row
+        LIT2 $0000
+        STA2 $ZP.si
+@col
+        ; A wedge with forty rows of overhang: lit where the row, less the
+        ; column, is more than 39. Widths 40, 41, ... 239 over 200 rows, so
+        ; 200*40 + (0+...+199) = 27900 - which is what python says and not what
+        ; I first wrote by hand.
+        LDA2 $ZP.sj
+        LDA2 $ZP.si
+        SUB2
+        LIT2 $0027
+        GTH2
+        JNZ @col-end
+        LIT $01
+        JSR2 @plotat
+@col-end
+        LDA2 $ZP.si
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.si
+        LDA2 $ZP.si
+        LIT2 $0140
+        GTH2
+        JNZ @col-end2
+        JMP @col
+@col-end2
+        LDA2 $ZP.sj
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.sj
+        LDA2 $ZP.sj
+        LIT2 $00c8
+        GTH2
+        JNZ @row-end
+        JMP @row
+@row-end
+        JMP2r2

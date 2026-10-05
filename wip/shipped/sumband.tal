@@ -1,0 +1,57 @@
+; sumband.tal - a band forty-two wide that slides one column left per row, so the
+; left edge leaves the screen and the run is clipped rather than wrapped.
+
+;   ./duxasm -o roms/sumband.rom asm/sumband.tal
+;   ./duxsdl roms/sumband.rom
+;
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        LIT2 $0000
+        STA2 $ZP.sj
+@row
+        LIT2 $0000
+        STA2 $ZP.si
+@col
+        ; A band on the sum of the counters rather than on a difference: every
+        ; pixel between 100 and 140 away from the top left corner along the
+        ; anti-diagonal.
+
+        LIT2 $0063
+        LDA2 $ZP.si
+        LDA2 $ZP.sj
+        ADD2
+        GTH2
+        JNZ @col-end
+        LDA2 $ZP.si
+        LDA2 $ZP.sj
+        ADD2
+        LIT2 $008c
+        GTH2
+        JNZ @col-end
+        LIT $01
+        JSR2 @plotat
+@col-end
+@col-end
+        LDA2 $ZP.si
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.si
+        LDA2 $ZP.si
+        LIT2 $0140
+        GTH2
+        JNZ @col-end2
+        JMP @col
+@col-end2
+        LDA2 $ZP.sj
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.sj
+        LDA2 $ZP.sj
+        LIT2 $00c8
+        GTH2
+        JNZ @row-end
+        JMP @row
+@row-end
+        JMP2r2

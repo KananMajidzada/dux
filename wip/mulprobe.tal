@@ -1,0 +1,71 @@
+; Probe: does byte MUL compute what the source says?
+;
+; Two grids, both bounded, i from 0 to 7.
+;
+;   left   a pixel at x = 20 + i*i  - so the column each pixel lands in *is*
+;         the square. A staircase of 0,1,4,9,16,25,36,49 proves it.
+;   right  a pixel at x = 100 + i if i*i <= 36, so the pattern says whether
+;         the compare and the multiply agree.
+;
+; The first version of this probe let its loops run to 256 instead of bounding
+; them, which put 65536 iterations on the frame and made the picture depend on
+; where the step budget ran out. Bounded loops only.
+
+INCLUDE "../asm/common.tal"
+
+@ZP.i     = $60
+@ZP.s     = $61
+
+@draw
+        JSR2 @clear
+        LIT $00
+        STA $ZP.i
+@i-loop
+        LDZ $ZP.i
+        JSR2 @sq
+        STA $ZP.s
+
+        ; left: x = 20 + the square
+        LDA $ZP.s
+        LIT $14
+        ADD
+        JSR2 @widen
+        LIT2 $0014
+        LIT $01
+        JSR2 @plot
+
+        ; right: x = 100 + i, but only where the square is within 36
+        LDZ $ZP.s
+        LIT $24
+        GTH
+        JNZ @right-plot
+        JMP @i-next
+@right-plot
+        LDZ $ZP.i
+        JSR2 @widen
+        LIT2 $0064
+        ADD2
+        LIT2 $0014
+        LIT $01
+        JSR2 @plot
+@i-next
+        LDZ $ZP.i
+        LIT $01
+        ADD
+        DUP
+        STA $ZP.i
+        LDZ $ZP.i
+        LIT $08
+        GTH                            ; keep going while i is under 8
+        JNZ @i-loop
+
+        JMP2r2
+
+; Stack: a byte. Leaves its square. Byte mode wraps at 256, and the largest
+; square asked for here is 49, so the wrap is not what is being measured.
+@sq
+        STA $ZP.i
+        LDZ $ZP.i
+        LDZ $ZP.i
+        MUL
+        JMP2r2

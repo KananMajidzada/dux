@@ -1,0 +1,178 @@
+; moire.tal - two families of diagonal lines, interfering
+;
+;   ./duxasm -o roms/moire.rom asm/moire.tal
+;   ./duxsdl roms/moire.rom
+;
+; Two sets of single-pixel diagonals a whole screen apart:
+;
+;   x + y == 0 (mod 48)      colour 1
+;   2x + y == 0 (mod 61)     colour 2
+;   both                     colour 3
+;
+; One row of each family is a line of pixels stepping the modulus, so the figure
+; costs a handful of instructions per row rather than a test per pixel. Where the
+; two cross there is a third colour, and there are only twenty-three of those:
+; the moduli are coprime, so a column satisfies both only every 48*61 = 2928
+; columns, and the screen is 320 wide. That is the whole figure - two families
+; that each look like nothing much and together look like cloth.
+;
+; Zero page: $22 the row, $24 and $26 the two starting columns, $28 and $2a
+; scratch for the divisions, $2c the current column.
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        LIT2 $0000
+        STA2 $22
+
+@row
+        LDA2 $22
+        JSR2 @start-a
+        LDA2 $22
+        JSR2 @start-b
+
+        ; family B first, in colour 2. A is drawn over it, so a crossing comes
+        ; out in colour 3 rather than needing a third pass to undo the overlap.
+        LDA2 $26
+        STA2 $2c
+&row-b
+        LDZ2 $2c
+        LIT2 $0140
+        GTH2
+        JNZ &row-b-end
+        LDA2 $2c
+        LDA2 $22
+        LIT $02
+        JSR2 @plot
+        LDA2 $2c
+        LIT2 $003d
+        ADD2
+        STA2 $2c
+        JMP &row-b
+&row-b-end
+
+        LDA2 $24
+        STA2 $2c
+&row-a
+        LDZ2 $2c
+        LIT2 $0140
+        GTH2
+        JNZ &row-a-end
+        ; colour 3 where this pixel is also on B, else colour 1
+        LDA2 $2c
+        LIT2 $0002
+        MUL2
+        LDA2 $22
+        ADD2
+        JSR2 @mod61
+        LIT2 $0000
+        NEQ2
+        JNZ &row-a-plain
+        LIT $03
+        STA $ZP.u
+        JMP &row-a-go
+&row-a-plain
+        LIT $01
+        STA $ZP.u
+&row-a-go
+        ; @plot takes its three values off the top in the order colour, y, x,
+        ; so the colour has to be pushed *after* x and y - not before. Family B
+        ; pushes it last and works; this one had it underneath, and @plot was
+        ; using the high byte of y as the colour and the two bytes of colour as
+        ; the row.
+        LDA2 $2c
+        LDA2 $22
+        LDZ $ZP.u
+        JSR2 @plot
+        LDA2 $2c
+        LIT2 $0030
+        ADD2
+        STA2 $2c
+        JMP &row-a
+&row-a-end
+
+        LDA2 $22
+        LIT2 $0001
+        ADD2
+        STA2 $22
+        LDA2 $22
+        LIT2 $00c8
+        GTH2
+        JNZ @row-end
+        JMP @row
+@row-end
+        JMP2r2
+
+; Stack: a short. Leaves that short modulo 61 on the stack.
+;
+; There is no remainder instruction, so the quotient comes from DIV2 and the
+; remainder is what is left after subtracting the quotient times the divisor
+; back out. The value is below 840, so nothing here can overflow a short.
+@mod61
+        STA2 $28
+        LDA2 $28
+        LIT2 $003d
+        DIV2
+        STA2 $2a
+        LDA2 $28
+        LDA2 $2a
+        LIT2 $003d
+        MUL2
+        SUB2
+        JMP2r2
+
+; Stack: the row. Leaves the first column of family A in $24.
+;
+; x + y is a multiple of 48, so the first such column is (-y) mod 48. A row
+; where y is itself a multiple of 48 starts at zero rather than at 48.
+@start-a
+        STA2 $22
+        LDA2 $22
+        LIT2 $0030
+        DIV2
+        STA2 $28
+        LDA2 $22
+        LDA2 $28
+        LIT2 $0030
+        MUL2
+        SUB2
+        STA2 $2a
+        LDA2 $2a
+        LIT2 $0000
+        NEQ2
+        JNZ &start-a-set
+        LIT2 $0000
+        JMP &start-a-go
+&start-a-set
+        LIT2 $0030
+        LDA2 $2a
+        SUB2
+&start-a-go
+        STA2 $24
+        JMP2r2
+
+; Stack: the row. Leaves the first column of family B in $26.
+;
+; 2x + y is a multiple of 61. Two has an inverse mod 61 - 31, because 2*31 is 62,
+; one more than 61 - so x is (-y)*31 mod 61, and the first column is the least
+; non-negative residue of the negative of that.
+@start-b
+        STA2 $22
+        LDA2 $22
+        LIT2 $001f
+        MUL2
+        JSR2 @mod61
+        STA2 $2a
+        LDA2 $2a
+        LIT2 $0000
+        NEQ2
+        JNZ &start-b-set
+        LIT2 $0000
+        JMP &start-b-go
+&start-b-set
+        LIT2 $003d
+        LDA2 $2a
+        SUB2
+&start-b-go
+        STA2 $26
+        JMP2r2

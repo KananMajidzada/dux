@@ -1,0 +1,75 @@
+; dots.tal - a lattice of dots, breathing in colour
+;
+;   ./duxasm -o roms/dots.rom asm/dots.tal
+;   ./duxsdl roms/dots.rom
+;
+; A grid of two-pixel dots. The colour steps with x+y, so the diagonals are
+; bands of one colour and the eye reads the slope off them.
+
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        STA $ZP.j $00
+        @row
+        STA $ZP.i $00
+        @col
+        LDZ $ZP.i
+        JSR2 @widen
+        LIT2 $0020
+        ADD2
+        STA2 $ZP.rx
+        LDZ $ZP.j
+        JSR2 @widen
+        LIT2 $0018
+        ADD2
+        STA2 $ZP.ry
+        STA $ZP.k $00
+        @dot
+        LDZ2 $ZP.rx
+        LDZ2 $ZP.ry
+        LDZ $ZP.i
+        LDZ $ZP.j
+        ADD
+        LIT $03
+        AND
+        JSR2 @plot
+        LDZ $ZP.k
+        LIT $01
+        ADD
+        STA $ZP.k
+        LDZ $ZP.k
+        LIT $01
+        GTH
+        JNZ @dot-end
+        JMP @dot
+        @dot-end
+        LDZ2 $ZP.rx
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.rx
+        LDZ2 $ZP.ry
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.ry
+        LDZ $ZP.i
+        LIT $01
+        ADD
+        STA $ZP.i
+        LDZ $ZP.i
+        LIT $07
+        GTH
+        JNZ @col-end
+        JMP @col
+        @col-end
+        LDZ $ZP.j
+        LIT $01
+        ADD
+        STA $ZP.j
+        LDZ $ZP.j
+        LIT $09
+        GTH
+        JNZ @row-end
+        JMP @row
+        @row-end
+        JMP2r2

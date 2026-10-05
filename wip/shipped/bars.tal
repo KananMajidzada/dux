@@ -1,0 +1,80 @@
+; bars.tal - four horizontal bands of colour.
+;
+;   ./duxasm -o roms/bars.rom asm/bars.tal
+;   ./duxsdl roms/bars.rom
+;
+; The simplest thing here that is still not the erase: rows of one colour,
+; stacked. Twenty columns by eighty rows, so the bands sit down the left of the
+; screen instead of washing across it.
+;
+; The band number is a counter rather than a division. Dividing the row by
+; twenty looks tidier, but DIV2 divides two shorts: handed a byte and whatever
+; is under it, it returns noise, usually zero, and a zero palette index is the
+; background colour - so the program appears to draw nothing at all. Counting
+; the bands instead keeps every loop counter a byte and every stack balanced.
+
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        STA $ZP.band $00
+@band
+        STA $ZP.j $00
+@row
+        STA $ZP.i $00
+@col
+        LDZ $ZP.i
+        JSR2 @widen
+        LIT2 $0020
+        ADD2
+        STA2 $ZP.rx
+        ; y = 20 + j + band * 20. The row counter restarts at each band, so
+        ; without the band term every band lands on the same twenty rows and
+        ; the last one painted hides the other three.
+        LDZ $ZP.j
+        JSR2 @widen
+        STA2 $ZP.ex
+        LDZ $ZP.band
+        JSR2 @widen
+        LIT2 $0014
+        MUL2
+        LDA2 $ZP.ex
+        ADD2
+        LIT2 $0014
+        ADD2
+        STA2 $ZP.ry
+        LDZ2 $ZP.rx
+        LDZ2 $ZP.ry
+        LDZ $ZP.band
+        JSR2 @plot
+        LDZ $ZP.i
+        LIT $01
+        ADD
+        STA $ZP.i
+        LDZ $ZP.i
+        LIT $13
+        GTH
+        JNZ @col-end
+        JMP @col
+@col-end
+        LDZ $ZP.j
+        LIT $01
+        ADD
+        STA $ZP.j
+        LDZ $ZP.j
+        LIT $13
+        GTH
+        JNZ @row-end
+        JMP @row
+@row-end
+        LDZ $ZP.band
+        LIT $01
+        ADD
+        STA $ZP.band
+        LDZ $ZP.band
+        LIT $03
+        GTH
+        JNZ @band-end
+        JMP @band
+@band-end
+        JMP2r2

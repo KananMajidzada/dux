@@ -1,0 +1,125 @@
+; checker.tal - a checkerboard.
+;
+;   ./duxasm -o roms/checker.rom asm/checker.tal
+;   ./duxsdl roms/checker.rom
+;
+; Ten by ten blocks of eight pixels, alternating, on a sixteen pixel pitch.
+; The whole of a checkerboard is one comparison of the two counters, which is
+; why it is worth drawing at this size: the board is a hundred and sixty pixels
+; square and the diagonal reads clearly.
+;
+; The board starts at sixteen, not at the origin, and that is not decoration.
+; Drawn flush to the corner it covers the pixel most harnesses sample to find
+; the background colour, so the background is read off a checker and every one
+; of the fifty-seven thousand background pixels counts as lit. That reads as a
+; runaway loop - it sent this one to the bin twice - when the drawing was right
+; all along. A margin is what keeps a harness from being able to say that.
+;
+; Every position here is a short built by widening a byte and adding, never a
+; byte stored over half of a short. That is not fussiness: a byte store into a
+; short leaves the other half holding whatever was there, which is in bounds,
+; assembles clean, and reads back multiplied by 256.
+
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        STA $ZP.j $00
+@crow
+        STA $ZP.i $00
+@ccol
+        ; The colour of this cell, and where its top left corner is.
+        ; Colour one or two, by the parity of i + j.
+        ;
+        ; XOR rather than a comparison, because "i equals j" is not the same
+        ; picture: it lights the diagonal and leaves everything else one colour,
+        ; which is a different board and not obviously wrong if you only check
+        ; the total. The low bit of i XOR j is the parity of i + j, and EOR and
+        ; AND are both byte forms here, so @plot gets the single byte it wants.
+        ;
+        ; One more than the parity, not the parity itself: colour zero is the
+        ; background, so a board drawn straight from the parity is half erased
+        ; and reads as a bug in the loop rather than in the palette.
+        LDZ $ZP.i
+        LDZ $ZP.j
+        EOR
+        LIT $01
+        AND
+        LIT $01
+        ADD
+        STA $ZP.t
+
+        LDZ $ZP.i
+        JSR2 @widen
+        LIT2 $0010
+        MUL2
+        LIT2 $0010
+        ADD2
+        STA2 $ZP.ex
+        LDZ $ZP.j
+        JSR2 @widen
+        LIT2 $0010
+        MUL2
+        LIT2 $0010
+        ADD2
+        STA2 $ZP.ey
+
+        STA $ZP.k $00
+@bx
+        STA $ZP.m $00
+@by
+        LDZ $ZP.k
+        JSR2 @widen
+        LDA2 $ZP.ex
+        ADD2
+        STA2 $ZP.rx
+        LDZ $ZP.m
+        JSR2 @widen
+        LDA2 $ZP.ey
+        ADD2
+        STA2 $ZP.ry
+        LDZ2 $ZP.rx
+        LDZ2 $ZP.ry
+        LDZ $ZP.t
+        JSR2 @plot
+        LDZ $ZP.m
+        LIT $01
+        ADD
+        STA $ZP.m
+        LDZ $ZP.m
+        LIT $07
+        GTH
+        JNZ @by-end
+        JMP @by
+@by-end
+        LDZ $ZP.k
+        LIT $01
+        ADD
+        STA $ZP.k
+        LDZ $ZP.k
+        LIT $07
+        GTH
+        JNZ @bx-end
+        JMP @bx
+@bx-end
+        LDZ $ZP.i
+        LIT $01
+        ADD
+        STA $ZP.i
+        LDZ $ZP.i
+        LIT $09
+        GTH
+        JNZ @ccol-end
+        JMP @ccol
+@ccol-end
+        LDZ $ZP.j
+        LIT $01
+        ADD
+        STA $ZP.j
+        LDZ $ZP.j
+        LIT $09
+        GTH
+        JNZ @crow-end
+        JMP @crow
+@crow-end
+        JMP2r2

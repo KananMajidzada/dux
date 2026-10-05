@@ -1,0 +1,164 @@
+; rays.tal - eight rays out from the middle
+;
+;   ./duxasm -o roms/rays.rom asm/rays.tal
+;   ./duxsdl roms/rays.rom
+;
+; Four axes and the four diagonals between them, from the centre of the screen,
+; in three colours cycling round. Nine hundred and sixteen pixels:
+;
+;   east   159   west 160   north 100   south  99
+;   south-east  99   north-west 100   north-east 100   south-west 99
+;
+; Three colours and not four, because the screen has four and one of them is the
+; background: the colour byte is two bits a channel, so a fourth foreground
+; colour masks down to zero and disappears into the background rather than
+; showing up as a new one. A figure that "should" have four colours renders with
+; three and a count short by exactly the fourth colour's share of the pixels,
+; which is 199 here.
+;
+; The eight directions are built rather than tabulated. Start with the axis
+; vector east, take a quarter turn at a time, and get the diagonals by adding the
+; vector to the one after it: east and south sum to south-east, and the next axis
+; is always the same quarter turn of the last. Four pairs of rays walk the whole
+; circle and the vector comes back to where it started, which is worth checking
+; against the count - if it did not, the later rays would not be the ones above.
+;
+; The rays are drawn without any test for the edge of the screen. The pixel port
+; drops a write outside it - all four sides, negatives included - so two hundred
+; steps along each direction is enough to leave the screen and what is left on it
+; is exactly what was counted. Checking that first was worth the ten minutes it
+; took: (319,199) is the last pixel the port takes, (320,199) and (319,200) are
+; both refused, and so are (400,100), (-1,100) and everything else off the edge.
+;
+; Zero page: $22 y, $24 x, $26 the axis vector's x, $28 its y, $2a and $2c the
+; direction the current ray is walked along, $2e and $30 the centre, $32 scratch
+; and the steps left in a ray; $7a the colour, $7b the pairs drawn.
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        ; The centre goes in twice: once to be walked about, and once to be kept.
+        ; A ray walks the position it is handed and does not put it back, so the
+        ; centre has to survive all eight of them.
+        LIT2 $00a0              ; 160
+        STA2 $24                ; x starts in the middle
+        LDA2 $24
+        STA2 $2e
+        LIT2 $0064              ; 100
+        STA2 $22                ; y likewise
+        LDA2 $22
+        STA2 $30
+        LIT2 $0001
+        STA2 $26                ; the axis vector starts pointing east
+        LIT2 $0000
+        STA2 $28
+        LIT $01
+        STA $7a
+        LIT $00
+        STA $7b
+
+@pair
+        ; The axis vector lives in $26 and $28 and is only ever turned there. The
+        ; direction a ray is walked along is copied into $2a and $2c first.
+        ; Copying the other way round - putting the diagonal in $26 and $28 and
+        ; turning that - is what this did, and it is very quiet about it: the
+        ; vector went (1,0), (0,1), (-1,0), (0,-1) as far as four rays were
+        ; concerned and then came out as (-2,0), so one ray stepped two pixels at
+        ; a time and drew a dotted line. Every colour still appeared, the stack
+        ; was still even, and the figure was nine hundred pixels short.
+        LDA2 $26
+        STA2 $2a
+        LDA2 $28
+        STA2 $2c
+        JSR2 @ray
+        JSR2 @next-colour
+
+        ; The diagonal is the axis plus a quarter turn of it, which for (dx, dy)
+        ; is (dx - dy, dx + dy).
+        LDA2 $26
+        LDA2 $28
+        SUB2
+        STA2 $2a
+        LDA2 $26
+        LDA2 $28
+        ADD2
+        STA2 $2c
+        JSR2 @ray
+        JSR2 @next-colour
+
+        ; A quarter turn clockwise is (dx, dy) becoming (-dy, dx), so the old dx
+        ; is kept while the new one is made. SUB2 is first minus second, so the
+        ; zero goes on first to get the negation.
+        LDA2 $26
+        STA2 $32
+        LIT2 $0000
+        LDA2 $28
+        SUB2
+        STA2 $26
+        LDA2 $32
+        STA2 $28
+
+        LDZ $7b
+        LIT $01
+        ADD
+        STA $7b
+        LDZ $7b
+        LIT $03
+        GTH                     ; four pairs of rays
+        JNZ @draw-end
+        JMP @pair
+@draw-end
+        JMP2r2
+
+; Two hundred steps along the vector in ($2a, $2c), starting one step out from
+; the centre, in the colour in $7a.
+;
+; The position is put back first every time. Without that the second ray starts
+; where the first one stopped - which, for a ray that has to run off the screen
+; to be long enough, is off the screen, and eight rays from the middle of
+; nowhere draw about a hundred pixels instead of nine hundred.
+@ray
+        LDA2 $2e
+        STA2 $24
+        LDA2 $30
+        STA2 $22
+        LIT2 $00c8
+        STA2 $32
+&ray-step
+        LDA2 $24
+        LDA2 $2a
+        ADD2
+        STA2 $24
+        LDA2 $22
+        LDA2 $2c
+        ADD2
+        STA2 $22
+        LDA2 $24
+        LDA2 $22
+        LDZ $7a
+        JSR2 @plot
+        LDA2 $32
+        LIT2 $0001
+        SUB2
+        STA2 $32
+        LDA2 $32
+        LIT2 $0000
+        NEQ2
+        JNZ &ray-step
+        JMP2r2
+
+@next-colour
+        LDZ $7a
+        LIT $01
+        ADD
+        STA $7a
+        LDZ $7a
+        LIT $03
+        GTH                     ; GTH is strict and the flag is taken when it is
+        JNZ @colour-wrap        ; set, so "past the last colour" is the branch
+        JMP @colour-done        ; and the fall-through is the normal case
+@colour-wrap
+        LIT $01
+        STA $7a
+@colour-done
+        JMP2r2

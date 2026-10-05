@@ -1,0 +1,94 @@
+; widenprobe.tal - settle two things by measurement, not by reading the source.
+;
+;   1. Does @widen sign-extend, or shift the byte into the high half?
+;   2. Are GTH2 and LTH2 first-then-second, or second-then-first?
+;
+; Both are load-bearing for @seg, and getting either backwards is a silent wrong
+; answer rather than a crash: a wrong @widen still returns a short, and a
+; reversed comparison still returns a flag.
+;
+; The answer is read off the picture. A widened $ff that is -1 lands off the
+; left edge of a 320-wide screen; $ff00 lands off the right. And each
+; comparison marks a row only if it came out true, so a row with nothing on it
+; is a false and a row with a pixel at x=1 is a true.
+
+INCLUDE "../asm/common.tal"
+
+; common.tal uses $10 to $26; $27 is free.
+@ZP.row   = $27                      ; a SHORT, not a byte
+
+@draw
+        JSR2 @clear
+
+        ; ---- @widen.  Row 8, x = the widened value.
+        LIT2 $0000
+        STA2 $ZP.row
+        LIT $ff
+        JSR2 @widen
+        JSR2 @mark
+
+        ; ---- 2 GTH 1, row 9.
+        LIT2 $0009
+        STA2 $ZP.row
+        LIT2 $0002
+        LIT2 $0001
+        GTH2
+        JNZ @g21
+        JMP @n21
+@g21
+        LIT2 $0001
+        JSR2 @mark
+@n21
+
+        ; ---- 1 GTH 2, row 10.
+        LIT2 $000a
+        STA2 $ZP.row
+        LIT2 $0001
+        LIT2 $0002
+        GTH2
+        JNZ @g12
+        JMP @n12
+@g12
+        LIT2 $0001
+        JSR2 @mark
+@n12
+
+        ; ---- 2 LTH 1, row 11.
+        LIT2 $000b
+        STA2 $ZP.row
+        LIT2 $0002
+        LIT2 $0001
+        LTH2
+        JNZ @l21
+        JMP @n21b
+@l21
+        LIT2 $0001
+        JSR2 @mark
+@n21b
+
+        ; ---- 1 LTH 2, row 12.
+        LIT2 $000c
+        STA2 $ZP.row
+        LIT2 $0001
+        LIT2 $0002
+        LTH2
+        JNZ @l12
+        JMP @n12b
+@l12
+        LIT2 $0001
+        JSR2 @mark
+@n12b
+
+        JMP2r2
+
+; Stack: a short. Plots it at x = the value, y = $ZP.row.
+;
+; JSR2 and not the JMP2 tail call that @plotat uses: the tail call eats a
+; return address of its own, and @plot's own JMP2r2 eats a second one, so a
+; routine entered with JSR2 and ending in JMP2 @plot pops two addresses per
+; call and lands somewhere the assembler never checked.
+@mark
+        LDA2 $ZP.row
+        LIT $01
+        JSR2 @plot
+        JMP2r2

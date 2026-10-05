@@ -1,0 +1,25 @@
+# Build outputs. Everything here is made by `make`, so it is not worth
+# versioning and a diff of it is noise.
+dux
+duxasm
+duxsdl
+tests
+tests-devices
+tests-host
+tests-dbg
+tests-asan
+tests-dev-asan
+tests-host-asan
+*.o
+
+# Stray artefacts from a render or a hand-assembled test.
+out.rom
+*.ppm
+*.wav
+
+# The self-test ROM is built by the test targets, not shipped.
+roms/test.rom
+
+# Python bytecode from tools/.
+__pycache__/
+*.pyc

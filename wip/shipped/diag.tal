@@ -1,0 +1,69 @@
+; diag.tal - diagonal stripes, one colour, sixteen to the period.
+;
+;   ./duxasm -o roms/diag.rom asm/diag.tal
+;   ./duxsdl roms/diag.rom
+;
+; (x + y) mod 16 under four. Skipping is therefore "four or more", which is
+; $0003 and GTH2 rather than $0004 and LTH2 - getting that backwards leaves the
+; eightieth of the screen that should be lit drawn in the background colour, and
+; the total still comes to 16000. The count could not tell the difference; the
+; histogram could, because the lit pixels were the background colour. The screen is 320 wide and sixteen divides 320
+; exactly, so every row has exactly eighty lit pixels whatever y is, and the
+; count is 80 * 200 = 16000 without having to render it to find out.
+;
+; The sum is a short and the mask is a short mask. Both counters here are
+; shorts, so widening the sum to a byte would wrap at 256 - and the stripes
+; would still come out right, because 256 is a multiple of sixteen. That is not
+; a reason to do it: it is a reason to notice how easily a wrong answer looks
+; like a right one.
+
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        LIT2 $0000
+        STA2 $ZP.sj
+@row
+        LIT2 $0000
+        STA2 $ZP.si
+@col
+        LDA2 $ZP.si
+        LDA2 $ZP.sj
+        ADD2
+        LIT2 $000f
+        AND2
+        LIT2 $0003
+        GTH2
+        JNZ @col-end
+        LIT $01
+        STA $ZP.t
+        LDA2 $ZP.si
+        STA2 $ZP.rx
+        LDA2 $ZP.sj
+        STA2 $ZP.ry
+        LDZ2 $ZP.rx
+        LDZ2 $ZP.ry
+        LDZ $ZP.t
+        JSR2 @plot
+@col-end
+        LDA2 $ZP.si
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.si
+        LDA2 $ZP.si
+        LIT2 $0140
+        GTH2
+        JNZ @col-end2
+        JMP @col
+@col-end2
+        LDA2 $ZP.sj
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.sj
+        LDA2 $ZP.sj
+        LIT2 $00c8
+        GTH2
+        JNZ @row-end
+        JMP @row
+@row-end
+        JMP2r2

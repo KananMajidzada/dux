@@ -1,0 +1,54 @@
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        LIT2 $0000
+        STA2 $ZP.sj
+@row
+        LIT2 $0000
+        STA2 $ZP.si
+@col
+        ; A wide V: a pixel is in it when its row is at least as deep as its
+        ; column and at most the distance from the far side, so the width of each
+        ; row is min(row, 319 - row).
+        ;
+        ; Counted by row, not by column: 1+2+...+160 = 12880 for the rows that
+        ; are still widening, and 160+159+...+121 = 5620 for the sixty that are
+        ; narrowing, so 18500. I first predicted 25760 by counting by column,
+        ; which is a different sum, and then "fixed" a program that had been right
+        ; all along - it dropped to 1640, which is the number a genuinely wrong
+        ; bound gives.
+        LDA2 $ZP.sj
+        LDA2 $ZP.si
+        LTH2
+        JNZ @col-end
+        LIT2 $013f
+        LDA2 $ZP.si
+        SUB2
+        LDA2 $ZP.sj
+        LTH2
+        JNZ @col-end
+        LIT $01
+        JSR2 @plotat
+@col-end
+        LDA2 $ZP.si
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.si
+        LDA2 $ZP.si
+        LIT2 $0140
+        GTH2
+        JNZ @col-end2
+        JMP @col
+@col-end2
+        LDA2 $ZP.sj
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.sj
+        LDA2 $ZP.sj
+        LIT2 $00c8
+        GTH2
+        JNZ @row-end
+        JMP @row
+@row-end
+        JMP2r2

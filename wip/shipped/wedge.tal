@@ -1,0 +1,64 @@
+; wedge.tal - a triangle, filled a row at a time.
+;
+;   ./duxasm -o roms/wedge.rom asm/wedge.tal
+;   ./duxsdl roms/wedge.rom
+;
+; Row y is y+1 pixels wide and only the first 184 rows are drawn, so the shape
+; is the triangle 0+1+2+...+184 = 184*185/2 = 17020 pixels. A scanline triangle
+; has no edges to get wrong, which is the point: everything else on this screen
+; that has a diagonal is a polygon whose fill has to be derived.
+;
+; The inner loop runs to 200 even though only 184 rows draw anything, because the
+; bound is the row number itself and the row is what grows.
+
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        LIT2 $0000
+        STA2 $ZP.sj
+@row
+        LIT2 $0000
+        STA2 $ZP.si
+@col
+        ; Past the point of the wedge the row is empty.
+        LDA2 $ZP.sj
+        LIT2 $00b7
+        GTH2
+        JNZ @col-end
+        LDA2 $ZP.si
+        LDA2 $ZP.sj
+        GTH2
+        JNZ @col-end
+        LIT $01
+        STA $ZP.t
+        LDA2 $ZP.si
+        STA2 $ZP.rx
+        LDA2 $ZP.sj
+        STA2 $ZP.ry
+        LDZ2 $ZP.rx
+        LDZ2 $ZP.ry
+        LDZ $ZP.t
+        JSR2 @plot
+@col-end
+        LDA2 $ZP.si
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.si
+        LDA2 $ZP.si
+        LIT2 $00c8
+        GTH2
+        JNZ @col-end2
+        JMP @col
+@col-end2
+        LDA2 $ZP.sj
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.sj
+        LDA2 $ZP.sj
+        LIT2 $00c8
+        GTH2
+        JNZ @row-end
+        JMP @row
+@row-end
+        JMP2r2

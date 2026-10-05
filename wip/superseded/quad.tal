@@ -1,0 +1,87 @@
+; quad.tal - four quadrants, three of them coloured.
+;
+;   ./duxasm -o roms/quad.rom asm/quad.tal
+;   ./duxsdl roms/quad.rom
+;
+; The colour is 1 + (x past the middle) + (y past the middle), which is the
+; whole program. It gives 1, 2, 2 and 3 - and the fourth quadrant being the same
+; colour as the second is not a mistake, it is two bits: the framebuffer is two
+; bits a pixel, so indices 0 to 3, and index 0 is the background. A "four by
+; four" of colours needs a fifth colour and there is not one.
+;
+; So a quarter of the drawing is invisible by arithmetic rather than by bug, and
+; the count has to know it: 288 * 168 = 48384 addressed, 36288 actually lit.
+
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        LIT2 $0000
+        STA2 $ZP.sj
+@row
+        LIT2 $0000
+        STA2 $ZP.si
+@col
+        ; Inside the inset rectangle, or nothing.
+        LDA2 $ZP.si
+        LIT2 $0010
+        LTH2
+        JNZ @col-end
+        LDA2 $ZP.si
+        LIT2 $012f
+        GTH2
+        JNZ @col-end
+        LDA2 $ZP.sj
+        LIT2 $0010
+        LTH2
+        JNZ @col-end
+        LDA2 $ZP.sj
+        LIT2 $00b7
+        GTH2
+        JNZ @col-end
+
+        LDA2 $ZP.si
+        LIT2 $009f
+        GTH2
+        STA $ZP.t
+        LDA2 $ZP.sj
+        LIT2 $0063
+        GTH2
+        STA $ZP.u
+        LDZ $ZP.t
+        LDZ $ZP.u
+        ADD
+        LIT $01
+        ADD
+        STA $ZP.t
+
+        LDA2 $ZP.si
+        STA2 $ZP.rx
+        LDA2 $ZP.sj
+        STA2 $ZP.ry
+        LDZ2 $ZP.rx
+        LDZ2 $ZP.ry
+        LDZ $ZP.t
+        JSR2 @plot
+@col-end
+        LDA2 $ZP.si
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.si
+        LDA2 $ZP.si
+        LIT2 $0140
+        GTH2
+        JNZ @col-end2
+        JMP @col
+@col-end2
+        LDA2 $ZP.sj
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.sj
+        LDA2 $ZP.sj
+        LIT2 $00c8
+        GTH2
+        JNZ @row-end
+        JMP @row
+@row-end
+        JMP2r2

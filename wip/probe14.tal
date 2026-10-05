@@ -1,0 +1,47 @@
+; probe14 - a comparison whose LEFT operand came out of AND2.
+; If the operands are read in the order they were pushed, (1) is 0. If the mask
+; result is read as the top operand instead, it is 1.
+INCLUDE "common.tal"
+
+@draw
+        ; 1: 10 AND 3 = 2, then 2 > 3  -> 0 if natural order
+        LIT2 $000a
+        LIT2 $0003
+        AND2
+        LIT2 $0003
+        GTH2
+        JSR2 @showb
+        ; 2: 2 < 3 -> 1 if natural order
+        LIT2 $000a
+        LIT2 $0003
+        AND2
+        LIT2 $0003
+        LTH2
+        JSR2 @showb
+        ; 3: 10 AND 15 = 10, then 10 > 7 -> 1
+        LIT2 $000a
+        LIT2 $000f
+        AND2
+        LIT2 $0007
+        GTH2
+        JSR2 @showb
+        ; 4: 10 < 7 -> 0
+        LIT2 $000a
+        LIT2 $000f
+        AND2
+        LIT2 $0007
+        LTH2
+        JSR2 @showb
+        ; 5: the masked value itself, 10
+        LIT2 $000a
+        LIT2 $000f
+        AND2
+        JSR2 @show
+        JMP2r2
+
+@showb
+        STA $ZP.k
+        LDZ $ZP.k
+        JSR2 @widen
+        JSR2 @show
+        JMP2r2

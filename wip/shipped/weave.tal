@@ -1,0 +1,122 @@
+; weave.tal - three diagonal lines every nine pixels
+;
+;   ./duxasm -o roms/weave.rom asm/weave.tal
+;   ./duxsdl roms/weave.rom
+;
+; A counter runs with x and y together and picks out every third step of nine:
+; step zero crimson, step three yellow, step six blue, and nothing drawn anywhere
+; else. Twenty-one thousand three hundred and thirty-three pixels, and the three
+; colours are 7111, 7112 and 7110 - not equal, because 320 is not a multiple of
+; nine and neither is 200, so the three stripes do not each get the same number
+; of rows to be cut short in.
+;
+; So the whole figure is one counter and three tests, which is the sort of thing
+; worth doing once: there is no arithmetic here that can go wrong and no
+; division, because the counter wraps by being compared rather than by dividing.
+;
+; Zero page: $22 the row, $24 the column, $7a where the row's counter starts,
+; $7b where the pixel's counter has got to, $7c the colour waiting its turn.
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        LIT2 $0000
+        STA2 $22                ; the row
+        LIT $00
+        STA $7a                 ; the counter entering this row
+
+@row
+        LIT2 $0000
+        STA2 $24                ; the column
+        LDZ $7a
+        STA $7b                 ; and the counter entering this row
+
+@col
+        ; Three tests for the three lines, and nothing drawn on the other six steps
+        ; of nine. EQU sets its flag when the two values are equal and JNZ takes
+        ; the branch when that flag is set, so here the branch *is* the line and
+        ; the fall-through is the skip. Written the other way round - testing and
+        ; falling through into the drawing - every test skips the line it was
+        ; looking for: eight steps out of nine get drawn instead of three, in the
+        ; colour of whichever test was left over.
+        LDZ $7b
+        LIT $00
+        EQU
+        JNZ &line-crimson
+        JMP &try-three
+&line-crimson
+        LIT $01
+        JMP @colour-done
+&try-three
+        LDZ $7b
+        LIT $03
+        EQU
+        JNZ &line-yellow
+        JMP &try-six
+&line-yellow
+        LIT $02
+        JMP @colour-done
+&try-six
+        LDZ $7b
+        LIT $06
+        EQU
+        JNZ &line-blue
+        JMP @col-step
+&line-blue
+        LIT $03
+@colour-done
+        STA $7c                 ; the colour waits its turn: @plot takes its
+        LDA2 $24                ; three values off the top in the order colour,
+        LDA2 $22                ; y, x, so a colour pushed before x and y ends
+        LDZ $7c                 ; up used as the row
+        JSR2 @plot
+
+@col-step
+        LDZ $7b
+        LIT $01
+        ADD
+        STA $7b
+        LDZ $7b
+        LIT $08
+        GTH                     ; nine steps and back to the start
+        JNZ &col-wrap
+        JMP &col-next
+&col-wrap
+        LIT $00
+        STA $7b
+&col-next
+        LDA2 $24
+        LIT2 $0001
+        ADD2
+        STA2 $24
+        LDA2 $24
+        LIT2 $013f              ; 319, the last column
+        GTH2
+        JNZ @row-step
+        JMP @col
+
+@row-step
+        LDA2 $22                ; on to the next row. This line was missing, and
+        LIT2 $0001              ; with it the row counter never moved: the figure
+        ADD2                    ; drew the top row over and over, until the frame
+        STA2 $22                ; ran out of steps.
+        LDZ $7a
+        LIT $01
+        ADD
+        STA $7a
+        LDZ $7a
+        LIT $08
+        GTH
+        JNZ @row-wrap
+        JMP @row-next
+@row-wrap
+        LIT $00
+        STA $7a
+@row-next
+        LDA2 $22
+        LIT2 $00c7              ; 199, the last row
+        GTH2
+        JNZ @draw-end
+        JMP @row
+@draw-end
+        JMP2r2

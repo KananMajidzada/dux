@@ -1,0 +1,49 @@
+; ramp.tal - a colour ramp across the screen
+;
+;   ./duxasm -o roms/ramp.rom asm/ramp.tal
+;   ./duxsdl roms/ramp.rom
+;
+; The leftmost column in one colour and the rightmost in another, stepped
+; every eight columns so the bands are visible as bands.
+
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        STA $ZP.j $00
+        @row
+        STA $ZP.i $00
+        @col
+        LDZ $ZP.i
+        JSR2 @widen
+        STA2 $ZP.si
+        LDZ $ZP.j
+        JSR2 @widen
+        LIT2 $0030
+        ADD2
+        STA2 $ZP.sj
+        LDZ $ZP.i
+        LIT $03
+        SFT
+        JSR2 @plotat
+        LDZ $ZP.i
+        LIT $01
+        ADD
+        STA $ZP.i
+        LDZ $ZP.i
+        LIT $27
+        GTH
+        JNZ @col-end
+        JMP @col
+        @col-end
+        LDZ $ZP.j
+        LIT $01
+        ADD
+        STA $ZP.j
+        LDZ $ZP.j
+        LIT $5f
+        GTH
+        JNZ @done
+        JMP @row
+        @done
+        JMP2r2

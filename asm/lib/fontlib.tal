@@ -1,0 +1,275 @@
+; fontlib.tal - the bitmap character set, shared by clock.rom and pong.rom.
+;
+; EIGHT wide and eight down, one byte a row, bit 7 the leftmost pixel: $81 is
+; #.....#, $3c is ..####.. . One bit per pixel and no sprite port anywhere - the
+; sprite packs four pixels to a byte at two bits each, which has to be re-decoded
+; every time something goes wrong in it, and this is a font, not a picture.
+;
+; The shape is in the data. A glyph is changed by changing one byte, and a row is
+; read as eight binary digits: $a5 is 10100101.
+;
+; Drawn one @plot per lit pixel. The eight columns of a row are unrolled with
+; their masks written in - $80, $40, $20 ... $01 - rather than walked round a
+; table, because a mask table means computing its address and every way of
+; computing an address on this machine has been wrong at least once.
+;
+; Each column's bit is tested BEFORE the coordinates go on the stack, so the "not
+; lit" path leaves nothing behind. A version that pushed x and y first and
+; branched afterwards left two bytes per dark pixel, which reads as a font that
+; melts towards the right.
+;
+; @glyph hands back the address of the NEXT glyph rather than taking an index, so
+; laying out a run of them is a walk with no arithmetic in it. There is no
+; multiply anywhere in this file.
+;
+; Why not the seven-segment digits this replaces: a seven-segment figure cannot
+; be a right-shaped digit. The 1 has no foot, the 4 is open-topped, the 7 is
+; bare, and no choice of masks or offsets changes that - the shape is not in the
+; data, it is in the seven pieces.
+;
+; Stack contracts, checked by the assembler and tools/netcheck.py:
+;   @glyph  x short, y short, glyph short, colour byte   seven in, two out
+;   @num    x short, y short, value byte, colour byte     six in, none out
+;
+; Zero page $a0 to $ab. Nothing else goes there: common.tal owns $10 to $26,
+; clock.rom $28 to $4d, pong.rom $22 to $60 and $7a.
+
+@ZP.fx    = $a0                    ; the glyph's top left
+@ZP.fy    = $a2
+@ZP.fp    = $a4                    ; walking the eight rows, handed back
+@ZP.fc    = $a6                    ; the colour
+@ZP.frow  = $a7                    ; rows left, eight
+@ZP.fr    = $a8                    ; the row's eight pixels
+@ZP.fk    = $a9                    ; @num's countdown
+
+; Stack: y short, value byte, colour byte. Four bytes. Draws one digit 0-9.
+;
+; The value counts glyphs off @font rather than indexing into it: nine walks at
+; the start of a frame is cheaper than the one multiply it saves, and a walk
+; cannot land in the wrong place.
+@num
+        STA $ZP.fc                ; the colour
+        STA $ZP.fk                ; the value, which is also the countdown
+        STA2 $ZP.fy               ; y
+        STA2 $ZP.fx               ; x
+        LIT2 @font
+        STA2 $ZP.fp
+; The walk and the draw are separate on purpose. @glyph hands back the address of
+; the NEXT glyph, so this steps the pointer down to the one the value names and
+; only then draws it - once, at that glyph. Drawing on every step instead stacks
+; glyph zero through glyph nine on the same spot, and because @glyph only ever
+; sets pixels and never clears them, the last one drawn is not what you see: the
+; union is. That renders as a plausible-looking smear rather than as an obvious
+; failure, and it was in here for a while before a test with the digits 0, 1, 2
+; and 7 side by side showed all four coming out identical.
+;
+; Glyph zero is the value zero, so no special case: the countdown reaches zero on
+; the first turn for a zero and draws @font itself.
+@num-loop
+        LDZ $ZP.fk
+        JNZ @num-go
+        LDA2 $ZP.fx
+        LDA2 $ZP.fy
+        LDA2 $ZP.fp
+        LDZ $ZP.fc
+        JSR2 @glyph
+        STA2 $ZP.fp                 ; the next-glyph address, thrown away. Two
+        JMP2r2                      ; bytes, so it cannot be POPped.
+@num-go
+        LDZ $ZP.fk
+        LIT $01
+        SUB
+        STA $ZP.fk
+        LDA2 $ZP.fp
+        LIT2 $0008                  ; eight bytes a glyph, one byte a row
+        ADD2
+        STA2 $ZP.fp
+        JMP @num-loop
+
+; Stack: x short, y short, glyph short, colour byte. Seven in, two out.
+@glyph
+        STA $ZP.fc
+        STA2 $ZP.fp
+        STA2 $ZP.fy
+        STA2 $ZP.fx
+        LIT $08
+        STA $ZP.frow
+@glyph-row
+        LDA2 $ZP.fp
+        LDA                     ; the row's eight pixels, and its address with it
+        STA $ZP.fr
+
+        LDZ $ZP.fr
+        LIT $80
+        AND
+        JNZ @glyph-lit0
+        JMP @glyph-col1
+@glyph-lit0
+        LDA2 $ZP.fx
+        LDA2 $ZP.fy
+        LDZ $ZP.fc
+        JSR2 @plot
+
+@glyph-col1
+        LDZ $ZP.fr
+        LIT $40
+        AND
+        JNZ @glyph-lit1
+        JMP @glyph-col2
+@glyph-lit1
+        LDA2 $ZP.fx
+LIT2 $0001
+        ADD2
+        LDA2 $ZP.fy
+        LDZ $ZP.fc
+        JSR2 @plot
+
+@glyph-col2
+        LDZ $ZP.fr
+        LIT $20
+        AND
+        JNZ @glyph-lit2
+        JMP @glyph-col3
+@glyph-lit2
+        LDA2 $ZP.fx
+LIT2 $0002
+        ADD2
+        LDA2 $ZP.fy
+        LDZ $ZP.fc
+        JSR2 @plot
+
+@glyph-col3
+        LDZ $ZP.fr
+        LIT $10
+        AND
+        JNZ @glyph-lit3
+        JMP @glyph-col4
+@glyph-lit3
+        LDA2 $ZP.fx
+LIT2 $0003
+        ADD2
+        LDA2 $ZP.fy
+        LDZ $ZP.fc
+        JSR2 @plot
+
+@glyph-col4
+        LDZ $ZP.fr
+        LIT $08
+        AND
+        JNZ @glyph-lit4
+        JMP @glyph-col5
+@glyph-lit4
+        LDA2 $ZP.fx
+LIT2 $0004
+        ADD2
+        LDA2 $ZP.fy
+        LDZ $ZP.fc
+        JSR2 @plot
+
+@glyph-col5
+        LDZ $ZP.fr
+        LIT $04
+        AND
+        JNZ @glyph-lit5
+        JMP @glyph-col6
+@glyph-lit5
+        LDA2 $ZP.fx
+LIT2 $0005
+        ADD2
+        LDA2 $ZP.fy
+        LDZ $ZP.fc
+        JSR2 @plot
+
+@glyph-col6
+        LDZ $ZP.fr
+        LIT $02
+        AND
+        JNZ @glyph-lit6
+        JMP @glyph-col7
+@glyph-lit6
+        LDA2 $ZP.fx
+LIT2 $0006
+        ADD2
+        LDA2 $ZP.fy
+        LDZ $ZP.fc
+        JSR2 @plot
+
+@glyph-col7
+        LDZ $ZP.fr
+        LIT $01
+        AND
+        JNZ @glyph-lit7
+        JMP @glyph-row-end
+@glyph-lit7
+        LDA2 $ZP.fx
+LIT2 $0007
+        ADD2
+        LDA2 $ZP.fy
+        LDZ $ZP.fc
+        JSR2 @plot
+
+@glyph-col8
+@glyph-row-end
+        LDA2 $ZP.fp
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.fp
+        LDA2 $ZP.fy
+        LIT2 $0001
+        ADD2
+        STA2 $ZP.fy
+        LDZ $ZP.frow
+        LIT $01
+        SUB
+        DUP
+        STA $ZP.frow
+        JNZ @glyph-row
+        LDA2 $ZP.fp
+        JMP2r2
+
+@font
+; --- NUMBERS ---
+        DB $7c, $c6, $c6, $c6, $c6, $c6, $c6, $7c        ; 0
+        DB $18, $38, $78, $18, $18, $18, $18, $7e        ; 1
+        DB $7c, $c6, $06, $0c, $18, $30, $60, $fe        ; 2
+        DB $7c, $c6, $06, $3c, $06, $06, $c6, $7c        ; 3
+        DB $0c, $1c, $3c, $6c, $cc, $ff, $0c, $0c        ; 4
+        DB $fe, $c0, $fc, $06, $06, $06, $c6, $7c        ; 5
+        DB $7c, $c6, $c0, $fc, $c6, $c6, $c6, $7c        ; 6
+        DB $fe, $c6, $06, $0c, $18, $30, $30, $30        ; 7
+        DB $7c, $c6, $c6, $7c, $c6, $c6, $c6, $7c        ; 8
+        DB $7c, $c6, $c6, $7e, $06, $06, $c6, $7c        ; 9
+
+; --- LETTERS ---
+        DB $38, $6c, $c6, $c6, $fe, $c6, $c6, $c6        ; A
+        DB $fc, $c6, $c6, $fc, $c6, $c6, $c6, $fc        ; B
+        DB $7c, $c6, $c0, $c0, $c0, $c0, $c6, $7c        ; C
+        DB $f8, $cc, $c6, $c6, $c6, $c6, $cc, $f8        ; D
+        DB $fe, $c0, $c0, $f8, $c0, $c0, $c0, $fe        ; E
+        DB $fe, $c0, $c0, $f8, $c0, $c0, $c0, $c0        ; F
+        DB $7c, $c6, $c0, $c0, $ce, $c6, $c6, $7c        ; G
+        DB $c6, $c6, $c6, $fe, $c6, $c6, $c6, $c6        ; H
+        DB $7c, $18, $18, $18, $18, $18, $18, $7c        ; I
+        DB $7e, $0c, $0c, $0c, $0c, $cc, $cc, $78        ; J
+        DB $cc, $d8, $f0, $e0, $f0, $d8, $cc, $c6        ; K
+        DB $c0, $c0, $c0, $c0, $c0, $c0, $c0, $fe        ; L
+        DB $c3, $e7, $ff, $db, $c3, $c3, $c3, $c3  ; M
+        DB $c3, $e3, $f3, $db, $cf, $c7, $c3, $c3  ; N
+        DB $7c, $c6, $c6, $c6, $c6, $c6, $c6, $7c        ; O
+        DB $fc, $c6, $c6, $fc, $c0, $c0, $c0, $c0        ; P
+        DB $7c, $c6, $c6, $c6, $ca, $ce, $7c, $06        ; Q
+        DB $fc, $c6, $c6, $fc, $f0, $d8, $cc, $c6        ; R
+        DB $7c, $c6, $c0, $7c, $06, $06, $c6, $7c        ; S
+        DB $ff, $18, $18, $18, $18, $18, $18, $18        ; T
+        DB $c6, $c6, $c6, $c6, $c6, $c6, $c6, $7c        ; U
+        DB $c3, $c3, $c3, $e7, $7e, $3c, $18, $18  ; V
+        DB $c3, $c3, $c3, $c3, $db, $ff, $e7, $c3  ; W
+        DB $c6, $c6, $6c, $38, $38, $6c, $c6, $c6        ; X
+        DB $c3, $c3, $66, $3c, $18, $18, $18, $18  ; Y
+        DB $fe, $06, $0c, $18, $30, $60, $c0, $fe        ; Z
+
+; --- MARKS ---
+        DB $00, $00, $00, $00, $00, $00, $00, $00        ; space
+        DB $10, $10, $10, $10, $10, $00, $10, $00        ; !
+        DB $00, $00, $00, $7e, $00, $00, $00, $00        ; -
+        DB $00, $00, $00, $00, $00, $18, $18, $00        ; .

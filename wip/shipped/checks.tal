@@ -1,0 +1,82 @@
+; checks.tal - does the shared prelude actually work?
+;
+;   ./duxasm -o roms/checks.rom asm/checks.tal
+;
+; Four dots and a filled block, in known places, so a glance - or a pixel count -
+; says whether @plot and @clear both landed. The first dot is colour 0, which
+; the prelude palette makes the same as the background, so it is deliberately
+; invisible: four dots go down and three pixels light up.
+;
+; This ROM used to carry its own copy of @widen, which is why it would not
+; assemble - a second definition of a label the prelude had already made.
+; checks.tal - does the shared prelude actually work?
+;
+;   ./duxasm -o roms/checks.rom asm/checks.tal
+;
+; Four dots and a filled block, in known places, so a glance - or a pixel count -
+; says whether @plot and @clear both landed.
+
+INCLUDE "common.tal"
+
+@draw
+        JSR2 @clear
+        ; four dots in a row, one per palette entry
+        LIT2 $0020
+        LIT2 $0014
+        LIT $00
+        JSR2 @plot
+        LIT2 $0030
+        LIT2 $0014
+        LIT $01
+        JSR2 @plot
+        LIT2 $0040
+        LIT2 $0014
+        LIT $02
+        JSR2 @plot
+        LIT2 $0050
+        LIT2 $0014
+        LIT $03
+        JSR2 @plot
+        ; A filled block: sixteen rows of sixteen. The counters are bytes, and
+        ; each is widened and offset before @plot sees it, so a byte store never
+        ; lands on half of a short. The test is "past fifteen", not "past
+        ; sixteen", so the run stops at sixteen rather than seventeen.
+        STA $ZP.j $00
+@row
+        STA $ZP.i $00
+@col
+        LDZ $ZP.i
+        JSR2 @widen
+        LIT2 $0030
+        ADD2
+        STA2 $ZP.rx
+        LDZ $ZP.j
+        JSR2 @widen
+        LIT2 $0020
+        ADD2
+        STA2 $ZP.ry
+        LDZ2 $ZP.rx
+        LDZ2 $ZP.ry
+        LIT $01
+        JSR2 @plot
+        LDZ $ZP.i
+        LIT $01
+        ADD
+        STA $ZP.i
+        LDZ $ZP.i
+        LIT $0f
+        GTH
+        JNZ @next-row
+        JMP @col
+@next-row
+        LDZ $ZP.j
+        LIT $01
+        ADD
+        STA $ZP.j
+        LDZ $ZP.j
+        LIT $0f
+        GTH
+        JNZ @block-done
+        JMP @row
+@block-done
+        JMP2r2
