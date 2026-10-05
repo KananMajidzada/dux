@@ -13,13 +13,6 @@
 A minimalist virtual machine.
 
 ---
-
-# Dux
-
-An 8-bit stack machine. 64KB addressable, dual 256-byte stacks, no
-general-purpose registers. Inspired by Uxn, permacomputing principles, and
-8-bit hardware conventions.
-
 ```
 dux/
   README.md           this file: the ISA, the devices, the assembler
@@ -71,9 +64,11 @@ and run it:
 ./duxsdl test.rom                          # or in a window
 ```
 
+You should see:
+
 ```text
 dux self test
-37 passed, 0 failed, date 2026-10-3
+37 passed, 0 failed
 ```
 
 To gate a change on it, match the printed count. A Dux program has no way to set
