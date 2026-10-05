@@ -273,3 +273,21 @@ LIT2 $0007
         DB $10, $10, $10, $10, $10, $00, $10, $00        ; !
         DB $00, $00, $00, $7e, $00, $00, $00, $00        ; -
         DB $00, $00, $00, $00, $00, $18, $18, $00        ; .
+
+; --- MARKS, MORE ---
+;
+; Appended rather than inserted: a mark belongs here only if nothing already
+; names it, and the glyphs above are addressed by index from four other places
+; (@num from 0, @char from wherever the program got to). Putting the colon
+; after the full stop keeps every one of those indices exactly where it was, so
+; the only thing this commit can change is that the font has one more shape in
+; it. Inserting it would have renumbered the full stop and everything past it.
+;
+; Two by two dots on rows 1-2 and 5-6. Rows 1 and 5 rather than 2 and 6, so the
+; gap between the dots lands on the middle of the glyph: a colon is a mark
+; BETWEEN two numbers, and centring it puts its gap on the centre row, where
+; the eye splits the shape in half. The dots are at $18 rather than $30, so they
+; sit on columns 3 and 4 and the mark is centred in its own eight-wide cell -
+; which is what lets a colon share a cell with a digit and line up with it.
+
+        DB $00, $18, $18, $00, $00, $18, $18, $00        ; :

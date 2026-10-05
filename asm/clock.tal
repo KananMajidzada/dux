@@ -1,235 +1,291 @@
-; clock.tal - the time, large.
+; clock.tal - a digital clock. The time, and the time.
 ;
 ;   ./duxasm -X -o roms/clock.rom asm/clock.tal
-;   ./dux -c 400000 -f 2 -p /tmp/clock.ppm roms/clock.rom
+;   ./dux -f 2 -p /tmp/clock.ppm roms/clock.rom
 ;   ./duxsdl roms/clock.rom
 ;
-; Six digits and two colons, every frame. The glyphs are the bitmap font in
-; asm/lib/fontlib.tal - eight wide, eight down, one byte a row, bit 7 the
-; leftmost pixel - and they reach the screen through @plot, one pixel at a time.
+; One line, HH:MM:SS, in the eight by eight monospaced bitmap font in
+; asm/lib/fontlib.tal. The time comes off the Datetime device, which is
+; read-only and is sampled once a frame, so the display cannot lag the host
+; clock by anything and there is nothing here to fall out of step with it.
+;
+; Three things this is built around, all of them machine details rather than
+; taste, and all three of them a mistake I made first:
+;
+; Monospaced, and the cursor does the placing
+; ------------------------------------------
+; One cell is an eight pixel glyph and an EIGHT pixel gap, so every cell is
+; sixteen wide and a digit occupies the same sixteen pixels whether or not it
+; is lit. That is the whole of it, and it is what stops a clock twitching: a
+; strip that advances by the width of each glyph has a 1 that is eight pixels
+; narrower than an 8, so the minutes jump sideways every time the tens digit
+; changes and the row stops being a row.
+;
+; @char leaves the cursor on the NEXT cell, so @draw never adds a pitch to a
+; column and there is no column constant to be wrong. @putat draws one glyph
+; where the cursor is and @pairat draws two, and each leaves it further on; the
+; order of the calls in @draw IS the order on screen. The digits land at 100,
+; 116, then the colon at 132, then 148, 164, the colon at 180, then 196 and
+; 212, which is eight cells centred on the 160 of a 320 wide screen.
 ;
 ; Drawn with @plot, not the sprite port
 ; ------------------------------------
-; A sprite byte is four pixels at TWO BITS each, and those two bits are a colour
-; index rather than a pixel. So a sprite cannot carry a one-bit-per-pixel glyph at
-; all: the row has to be rebuilt before it can be stamped, and a rebuilt row is a
-; second description of the same shape that can disagree with the first. @plot
-; takes the font bytes as they are. It costs more device writes - five a pixel
-; against four a row - and it cannot be a pixel wrong.
+; A sprite byte is four pixels at TWO BITS each, and two bits is a colour
+; rather than a pixel, so a one-bit glyph has to be repacked before it can be
+; stamped and the repack is a second description of the same shape that can
+; disagree with the first. @glyph takes the font bytes as they are, one @plot a
+; lit pixel. It costs five device writes a pixel against four a row, and it
+; cannot be a pixel wrong.
 ;
-; The digit shapes
-; ----------------
-; The digits are bitmap glyphs, not seven-segment figures. A seven-segment figure
-; cannot be a right-shaped digit: the 1 has no foot, the 4 is open-topped, the 7
-; is bare, and no choice of masks changes that - the shape is not in the data, it
-; is in the seven pieces.
+; Redraw everything, every frame
+; -----------------------------
+; @clear first, then the lot. It is wasteful and it is still right, because
+; nothing here remembers what was on the screen last frame, so there is no state
+; to be stale and a digit cannot be left behind under the one that replaced it.
+; A version that cleared only the old digits' boxes left the bottom bar of an 8
+; behind when it became a 1, and the time then read as a 1 sitting on a stripe
+; - invisible to a pixel count, obvious to anyone looking at it.
 ;
-; Why the digits refresh
-; ---------------------
-; @clear wipes the whole screen at the top of every frame, so a digit is never
-; drawn on top of the one before it. That is the whole of it, and it is worth
-; being explicit, because the version this replaces cleared only the boxes the old
-; digits had been in: an 8 going to a 1 left the bottom bar behind and the time
-; read as a 1 sitting on a stripe. Nothing about that is visible in a pixel count.
-;
-; Redrawing everything each frame is wasteful and much simpler. There is no
-; remembered previous value that can be stale, so the six digits cannot disagree
-; with each other or with the time they were read from.
+; What it cannot do is make the digits change at the same instant the host does.
+; The three fields are three reads, and a second boundary landing between them
+; shows an hour and minute from before it and a second from after it. Reading
+; all three into memory before drawing any of them shrinks that window to three
+; loads, which is smaller but not zero, and not worth three more zero page
+; shorts to claim otherwise.
 
 INCLUDE "common.tal"
 INCLUDE "lib/fontlib.tal"
 
-@CLK.hour   = $c6
-@CLK.minute = $c7
-@CLK.second = $c8
+@CLK.hour    = $c6       ; 0-23
+@CLK.minute  = $c7       ; 0-59
+@CLK.second  = $c8       ; 0-59
 
 ; --------------------------------------------------------------- zero page
 ;
-; $28 to $33. common.tal owns $10 to $26 and $7e and $7f; fontlib owns $a0 up.
-; Shorts sit on even addresses, because a short keeps its high byte at the lower
-; one.
-@ZP.v    = $28                    ; the value being split
-@ZP.tens = $29
-@ZP.un   = $2a
-@ZP.x    = $2c                    ; where the next digit goes, a short
-@ZP.y    = $2e                    ; the row every digit shares, a short
+; $28 to $37. common.tal owns $10 to $26 and $7e and $7f; fontlib owns $a0 to
+; $ab. Shorts sit on even addresses, because a short keeps its high byte at the
+; lower one, and every name here is used at one width and one width only - the
+; assembler's zero page lint is what keeps that true, because a short stored a
+; byte at a time is a counter that jumps to 256 on its first step.
+;
+; @ZP.gx and @ZP.gy are the cursor that every drawing routine reads and advances,
+; and the reason there is no x or y argument anywhere below @draw.
+
+@ZP.gx  = $28            ; the cursor: the next cell's column, a short
+@ZP.gy  = $2a            ; and its row, a short
+@ZP.gp  = $2c            ; the glyph being walked to, a short
+@ZP.v   = $2e            ; the value being split into digits, a short
+@ZP.ten = $30            ; ... and its two halves
+@ZP.un  = $32
+@ZP.ci  = $34            ; @char's countdown, a short
+@ZP.gc  = $36            ; the colour being drawn in, a byte
 
 ; ------------------------------------------------------------------ layout
 ;
-; Reading HH:MM:SS with the same space everywhere:
-;
-;     0  0  :  0  0  :  0  0
-;     |  |  |  |  |  |  |  |  |    <- eight clear pixels, every time
-;
-; Eight clear pixels between every two shapes, whatever they are: between the two
-; digits of a number, and between a digit and a colon. One gap, one size, so the
-; strip is a single rhythm and the eye can run along it without a surprise.
-;
-; Eight-wide glyphs make a pitch of sixteen, so @INNER is one pitch: a digit is
-; followed by exactly one gap however far away the next shape is. A pair is two
-; pitches and leaves the cursor on the colon that follows it; @colon draws where
-; the cursor already is and then steps on by its own two pixels plus one gap.
-;
-; $ZP.x walks the strip and each routine leaves it where the next one starts, so
-; the order in @draw is the order on screen and there is no column constant that
-; can disagree with another. Only @COL.1 is written down; the other seven positions
-; follow from the three distances beside it.
-@ROW.Y     = $005a                ; 90, the top of the glyphs
-@INNER     = $0010                ; 16: one glyph plus eight clear pixels
-@COLON.ADV = $000a                ; 10: the colon's two pixels plus eight clear
-@COL.1     = $006a                ; 106, the hour's tens. From there the digits
-                                  ; land at 106, 122, 148, 164, 190, 206 and the
-                                  ; colons at 138 and 180, so the strip runs 106
-                                  ; to 213 - 108 pixels, centred on the 160 of a
-                                  ; 320-wide screen.
+; @CELL is the only distance in this file. Eight cells at sixteen is 128 wide
+; and the last cell's eight pixel gap is not visible, so the visible run is
+; 120 and half of 320 minus that is 100.
+@CELL     = $0010        ; sixteen: an eight pixel glyph and an eight pixel gap
+@ROW      = $0060        ; 96, the top of the glyphs; 8 rows down puts the
+                          ; strip's middle on the middle row of a 200 tall screen
+@COL.8    = $0064        ; 100, for the eight cells of HH:MM:SS
 
-; ------------------------------------------------------------------- draw
+; Colours out of the four common.tal sets: 0 background, 1 white, 2 pink,
+; 3 grey. The digits are white because they are the thing being read, and the
+; colons are grey because they are punctuation and the eye should skip them.
+
+; ------------------------------------------------------------------- glyphs
+;
+; Indices into @font. Zero is the digit 0, so the ten digits are 0 to 9, the
+; twenty six letters are $0a to $23, and the marks follow.
+@CH.0      = $00
+@CH.9      = $09
+@CH.COLON  = $28
+
+; -------------------------------------------------------------------- draw
 ;
 ; Called once at reset and again every frame by common.tal's vector.
 @draw
-        ; The screen first, every frame. This is the refresh.
         JSR2 @clear
 
-        LIT2 @ROW.Y
-        STA2 $ZP.y
-        LIT2 @COL.1
-        STA2 $ZP.x
+        LIT2 @ROW
+        STA2 $ZP.gy
+        LIT2 @COL.8
+        STA2 $ZP.gx
 
-        ; The strip, read left to right. @pair leaves $ZP.x on the next digit and
-        ; @colon draws in the gap behind it, so the order here IS the order on
-        ; screen and no coordinate is written down twice.
-        DEI $CLK.hour
-        STA $ZP.v
-        JSR2 @pair         ; two digits, then sixteen on
-        JSR2 @colon        ; two dots, centred in the gap just left
+        ; DEI pushes a BYTE and @pairat wants a short, so the value goes through
+        ; @widen. Not optional and not a convenience: DEI2 would read the byte
+        ; and the byte ABOVE it, and the byte above hour $c6 is the low half of
+        ; year $c3, which is the low byte of the year. A short read of a byte
+        ; port reads the neighbouring field, and on a page whose whole layout is
+        ; that ports come in pairs that is off by one in a way that looks like
+        ; a clock running fast rather than like a bug.
+        DEI @CLK.hour
+        JSR2 @widen
+        LIT $01                      ; white
+        JSR2 @pairat
 
-        DEI $CLK.minute
-        STA $ZP.v
-        JSR2 @pair         ; two digits, then sixteen on
-        JSR2 @colon        ; two dots, centred in the gap just left
+        ; The cursor is now on the colon's cell: @pairat left it two cells
+        ; along from where it started, and the colon is the next cell of the
+        ; strip. @putat draws one glyph where the cursor is and steps on, so
+        ; nothing has to say where the colon goes.
+        LIT2 @CH.COLON
+        LIT $03                      ; grey
+        JSR2 @putat
 
-        DEI $CLK.second
-        STA $ZP.v
-        JSR2 @pair         ; the last two digits; the strip ends here
+        DEI @CLK.minute
+        JSR2 @widen
+        LIT $01
+        JSR2 @pairat
+
+        LIT2 @CH.COLON
+        LIT $03
+        JSR2 @putat
+
+        DEI @CLK.second
+        JSR2 @widen
+        LIT $01
+        JSR2 @pairat
 
         JMP2r2
 
-; Two digits out of the one byte in $ZP.v: the tens at $ZP.x and the units one
-; pitch along. Leaves $ZP.x one pitch past the units, which is where the next
-; piece of the strip belongs - a colon after a pair, nothing after the last one.
+; ------------------------------------------------------------------- putat
+;
+; Stack: index short, colour byte. Three in, none out.
+;
+; One glyph at the cursor. A tail call to @char, so the cursor is stepped in
+; exactly one place: @char is the only routine that moves it, which is what
+; makes the strip monospaced rather than merely spaced out.
+@putat
+        STA $ZP.gc
+        STA2 $ZP.v                   ; the index, held while gx and gy go on
+        LDA2 $ZP.gx
+        LDA2 $ZP.gy
+        LDA2 $ZP.v
+        LDZ $ZP.gc
+        JMP2 @char
+
+; ------------------------------------------------------------------ pairat
+;
+; Stack: value short, colour byte. Three in, none out.
+;
+; Two digits at the cursor, the value assumed to be under a hundred. A tail call
+; to @pair, for the same reason @putat is one.
+@pairat
+        STA $ZP.gc
+        STA2 $ZP.v
+        LDA2 $ZP.gx
+        LDA2 $ZP.gy
+        LDA2 $ZP.v
+        LDZ $ZP.gc
+        JMP2 @pair
+
+; -------------------------------------------------------------------- pair
+;
+; Stack: x short, y short, value short, colour byte. Seven in, none out.
+;
+; Two digits, tens then units, one cell apart. The units digit is drawn at
+; whatever @char left the cursor at rather than at the tens column plus a
+; pitch: the second digit's column is a consequence of the first one having
+; been drawn, not a constant that has to be kept in step with it.
 @pair
-        JSR2 @split
+        STA $ZP.gc
+        STA2 $ZP.v
+        STA2 $ZP.gy
+        STA2 $ZP.gx
 
-        LDA2 $ZP.x
-        LDA2 $ZP.y
-        LDZ $ZP.tens
-        LIT $01
-        JSR2 @num
+        ; tens = value / 10, then units = value - tens*10.
+        ;
+        ; Both in short arithmetic even though the value is under a hundred and
+        ; a byte divide would do. @char takes its index as a SHORT so that
+        ; nothing in the digit path has to narrow one, and narrowing is the
+        ; mistake this machine makes most easily: a short is two bytes and a
+        ; byte store takes one of them and leaves the other underneath, so the
+        ; value is right and the stack is a byte deeper than it was, which shows
+        ; up as a font that melts towards the right.
+        LDA2 $ZP.v
+        LIT2 $000a
+        DIV2
+        STA2 $ZP.ten
 
-        LDA2 $ZP.x
-        LIT2 @INNER
-        ADD2
-        STA2 $ZP.x
-        LDA2 $ZP.x
-        LDA2 $ZP.y
-        LDZ $ZP.un
-        LIT $01
-        JSR2 @num
+        LDA2 $ZP.v
+        LDA2 $ZP.ten
+        LIT2 $000a
+        MUL2
+        SUB2
+        STA2 $ZP.un
 
-        LDA2 $ZP.x
-        LIT2 @INNER
-        ADD2
-        STA2 $ZP.x
+        LDA2 $ZP.gx
+        LDA2 $ZP.gy
+        LDA2 $ZP.ten
+        LDZ $ZP.gc
+        JSR2 @char
+
+        LDA2 $ZP.gx                   ; wherever the tens digit left the cursor
+        LDA2 $ZP.gy
+        LDA2 $ZP.un
+        LDZ $ZP.gc
+        JSR2 @char
+
         JMP2r2
 
-; @num walks off the front of @font rather than indexing into it, because
-; computing a table's address has been wrong at least once on this machine and a
-; walk cannot be. @split has to make the value less than ten first.
-@split
-        LDZ $ZP.v
-        STA $ZP.un                ; the units are the value less the tens, so
-        LDZ $ZP.v                 ; the value is wanted again after the division
-        LIT $0a
-        DIV
-        STA $ZP.tens
-        LDZ $ZP.un
-        LDZ $ZP.tens
-        LIT $0a
-        MUL
-        SUB
-        STA $ZP.un
-        JMP2r2
-
-; The two dots of a colon, each a two by two block, on the first and fifth rows of
-; the digits: two rows of dot, two rows of gap, two rows of dot, so the dots sit
-; either side of the middle rather than on it. Rows 0 and 4 rather than 1 and 5,
-; because @draw puts $ZP.y on the top row and a colon is a mark between numbers,
-; not something indented into them.
+; -------------------------------------------------------------------- char
 ;
-; The colon is centred in the gap BEHIND $ZP.x, which @pair has already moved on
-; to the next digit: eight pixels of gap with a two-pixel colon in it, so the
-; colon goes five back. It hands $ZP.x back exactly as it found it - the gap is
-; already accounted for by the pair that drew the digits on either side of it, and
-; a colon that left the cursor moved would slide the rest of the strip along.
-@colon
-        ; The cursor is already on this colon's slot - @pair left it there - so
-        ; there is nothing to move before drawing.
-
-        LIT2 @ROW.Y
-        STA2 $ZP.y
-        JSR2 @dot
-        LDA2 $ZP.y
-        LIT2 $0004
-        ADD2
-        STA2 $ZP.y
-        JSR2 @dot
-        ; Put the row back, or every digit after a colon is four rows low.
-        ; LIT2 and not LDA2: LDA2 reads memory AT the address, and @ROW.Y is
-        ; $005a, which is a device port. It comes back as zero and every digit
-        ; after the colon lands on the top row of the screen.
-        LIT2 @ROW.Y
-        STA2 $ZP.y
-
-        ; And on to the next number: past the colon's own two pixels and one gap.
-        LDA2 $ZP.x
-        LIT2 @COLON.ADV
-        ADD2
-        STA2 $ZP.x
-        JMP2r2
-
-; A two by two block of colour 1 at $ZP.x, $ZP.y.
+; Stack: x short, y short, index short, colour byte. Seven in, none out.
 ;
-; Four @plot calls, which is what "drawn with @plot" means: there is no mask and
-; no packing, just four pixels at four places. $ZP.dx and $ZP.dy hold the four
-; coordinates because @plot wants x, y and colour, and a value already on the
-; stack cannot be added to without taking it off and pushing a second copy.
-@ZP.dx = $30
-@ZP.dy = $32
+; The glyph whose index it is, at that x and y, and then the cursor is one cell
+; further on. This is @num from fontlib with the cursor step @num does not have,
+; because nothing that uses @num lays a row of digits out.
+;
+; The index counts glyphs off @font rather than addressing into it, which is
+; @num's argument and it is a good one: a walk cannot land in the wrong place,
+; and computing a table's address has been wrong at least once on this machine.
+; A walk of ten steps is longer than the multiply it saves, which is the price,
+; and a clock draws six digits and two colons a frame.
+;
+; The operand pushed first is the one a comparison or a subtraction takes as
+; its left side, so GTH2 below asks "is the countdown above zero" and not "is
+; zero above the countdown". The zero goes on SECOND for that reason, and the
+; reverse order is false every time the countdown is still counting, which means
+; every digit would be drawn as a zero - a clock that reads 00:00:00 forever.
+@char
+        STA $ZP.gc
+        STA2 $ZP.ci
+        STA2 $ZP.gy
+        STA2 $ZP.gx
+        LIT2 @font
+        STA2 $ZP.gp
 
-@dot
-        LDA2 $ZP.x
-        LIT2 $0001
+; The walk and the draw are separate on purpose, exactly as in @num. Drawing on
+; every step stacks glyph zero through glyph n on the same spot, and since
+; @glyph only ever lights pixels and never clears them, the last one drawn is
+; not what you see - the union of all of them is. That reads as a plausible
+; smear rather than as a failure, which is the worst kind of failure to have.
+@char-loop
+        LDA2 $ZP.ci
+        LIT2 $0000
+        GTH2
+        JNZ @char-go
+        ; The countdown is zero, so the pointer has walked the whole way.
+        LDA2 $ZP.gx
+        LDA2 $ZP.gy
+        LDA2 $ZP.gp
+        LDZ $ZP.gc
+        JSR2 @glyph
+        STA2 $ZP.gp                   ; the next glyph, thrown away
+        ; And on one cell, which is what makes the strip monospaced.
+        LDA2 $ZP.gx
+        LIT2 @CELL
         ADD2
-        STA2 $ZP.dx
-        LDA2 $ZP.y
-        LIT2 $0001
-        ADD2
-        STA2 $ZP.dy
-
-        LDA2 $ZP.x
-        LDA2 $ZP.y
-        LIT $01
-        JSR2 @plot
-        LDA2 $ZP.dx
-        LDA2 $ZP.y
-        LIT $01
-        JSR2 @plot
-        LDA2 $ZP.x
-        LDA2 $ZP.dy
-        LIT $01
-        JSR2 @plot
-        LDA2 $ZP.dx
-        LDA2 $ZP.dy
-        LIT $01
-        JSR2 @plot
+        STA2 $ZP.gx
         JMP2r2
+@char-go
+        LDA2 $ZP.ci
+        LIT2 $0001
+        SUB2
+        STA2 $ZP.ci
+        LDA2 $ZP.gp
+        LIT2 $0008                    ; eight bytes a glyph, one byte a row
+        ADD2
+        STA2 $ZP.gp
+        JMP @char-loop

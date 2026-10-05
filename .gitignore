@@ -3,6 +3,7 @@
 dux
 duxasm
 duxsdl
+libdux.a
 tests
 tests-devices
 tests-host
