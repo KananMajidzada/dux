@@ -1,0 +1,130 @@
+; ascii.tal - printable ASCII from the 512_8 font, as data.
+; GENERATED, do not edit by hand; it comes from tools/font512.py, which
+; reads the upstream .txt for the bitmaps and the .tab for the names.
+;
+; The space, the letters, the digits and the punctuation: $20 to $7e,
+; ninety five glyphs, 760 bytes. It comes out of a 512 glyph font, which
+; is 4096 bytes, and replaced a hand-built 41 glyph table of 328 bytes.
+; The full set is not wanted: nothing on this machine draws anything else,
+; and the machine has 32256 bytes of code and data to spend, which is
+; plenty but not unlimited.
+;
+; From https://github.com/alexfru/512_8, sans. Public domain, Unlicense:
+; nothing is owed for using it. Upstream recommends bold as the most
+; legible of its three styles and warns that sans is thin with poor
+; contrast, which at 8x8 is visible - the colon is two single pixels and
+; the hyphen five. Worth knowing that the clock is set in this. Both styles
+; carry the same characters at the same indices, so changing style is
+; changing the file name on the generator command and nothing else.
+;
+; THE INDEX IS THE CHARACTER, MINUS THE SPACE
+; ----------------------------------------
+; The glyph for character code c is at @font + (c - $20) * 8, so glyph
+; zero is the space and the digits are $10 to $19 and A to Z are $21 to
+; $2a. That is the reason this range was chosen contiguous: a character
+; is one subtraction away from its own offset, with no table of mappings
+; and no search. The 512 glyph font cannot do this, because its index is
+; not its code point below $28 and not above $7e at all - glyph 1 is a
+; smiling face - which is why a subset like this one is the thing to use
+; rather than the whole table.
+;
+; 8 wide, 8 down, one byte a row, bit 7 the leftmost pixel: the layout
+; @glyph in fontlib.tal already expects, so these bytes are used exactly
+; as upstream has them and nothing is converted.
+
+@font
+        DB $00, $00, $00, $00, $00, $00, $00, $00        ; $20  U+00A0, blank
+        DB $00, $10, $10, $10, $10, $00, $10, $00        ; $21  U+203C
+        DB $00, $44, $44, $28, $00, $00, $00, $00        ; $22  upstream unlisted
+        DB $00, $48, $fc, $48, $48, $fc, $48, $00        ; $23  upstream unlisted
+        DB $10, $7c, $90, $7c, $12, $92, $7c, $10        ; $24  upstream unlisted
+        DB $00, $44, $e8, $50, $28, $5c, $88, $00        ; $25  upstream unlisted
+        DB $00, $20, $50, $64, $98, $88, $74, $00        ; $26  upstream unlisted
+        DB $00, $10, $10, $20, $00, $00, $00, $00        ; $27  U+2019
+        DB $00, $08, $10, $10, $10, $10, $08, $00        ; $28  U+0028  '('
+        DB $00, $20, $10, $10, $10, $10, $20, $00        ; $29  U+0029  ')'
+        DB $00, $00, $48, $30, $fc, $30, $48, $00        ; $2a  U+002A  '*'
+        DB $00, $00, $10, $10, $7c, $10, $10, $00        ; $2b  U+002B  '+'
+        DB $00, $00, $00, $00, $00, $10, $10, $20        ; $2c  U+002C  ','
+        DB $00, $00, $00, $00, $7c, $00, $00, $00        ; $2d  U+002D  '-'
+        DB $00, $00, $00, $00, $00, $00, $10, $00        ; $2e  U+002E  '.'
+        DB $00, $04, $08, $10, $20, $40, $80, $00        ; $2f  U+002F  '/'
+        DB $00, $78, $8c, $94, $a4, $c4, $78, $00        ; $30  U+0030  '0'
+        DB $00, $10, $30, $50, $10, $10, $7c, $00        ; $31  U+0031  '1'
+        DB $00, $78, $84, $04, $78, $80, $fc, $00        ; $32  U+0032  '2'
+        DB $00, $78, $84, $18, $04, $84, $78, $00        ; $33  U+0033  '3'
+        DB $00, $1c, $24, $44, $fe, $04, $04, $00        ; $34  U+0034  '4'
+        DB $00, $fc, $80, $f8, $04, $84, $78, $00        ; $35  U+0035  '5'
+        DB $00, $78, $80, $f8, $84, $84, $78, $00        ; $36  U+0036  '6'
+        DB $00, $fc, $04, $08, $10, $20, $20, $00        ; $37  U+0037  '7'
+        DB $00, $78, $84, $78, $84, $84, $78, $00        ; $38  U+0038  '8'
+        DB $00, $78, $84, $84, $7c, $04, $78, $00        ; $39  U+0039  '9'
+        DB $00, $00, $00, $10, $00, $00, $10, $00        ; $3a  U+003A  ':'
+        DB $00, $00, $00, $10, $00, $10, $10, $20        ; $3b  U+003B  ';'
+        DB $00, $00, $08, $10, $20, $10, $08, $00        ; $3c  U+003C  '<'
+        DB $00, $00, $00, $7c, $00, $7c, $00, $00        ; $3d  U+003D  '='
+        DB $00, $00, $20, $10, $08, $10, $20, $00        ; $3e  U+003E  '>'
+        DB $00, $38, $44, $08, $10, $00, $10, $00        ; $3f  U+003F  '?'
+        DB $00, $78, $9c, $a4, $9c, $80, $78, $00        ; $40  U+0040  '@'
+        DB $00, $10, $28, $28, $44, $7c, $82, $00        ; $41  U+0041  'A'
+        DB $00, $f8, $84, $f8, $84, $84, $f8, $00        ; $42  U+0042  'B'
+        DB $00, $78, $84, $80, $80, $84, $78, $00        ; $43  U+0043  'C'
+        DB $00, $f8, $84, $84, $84, $84, $f8, $00        ; $44  U+0044  'D'
+        DB $00, $fc, $80, $f0, $80, $80, $fc, $00        ; $45  U+0045  'E'
+        DB $00, $fc, $80, $f0, $80, $80, $80, $00        ; $46  U+0046  'F'
+        DB $00, $78, $84, $80, $9c, $84, $78, $00        ; $47  U+0047  'G'
+        DB $00, $84, $84, $fc, $84, $84, $84, $00        ; $48  U+0048  'H'
+        DB $00, $7c, $10, $10, $10, $10, $7c, $00        ; $49  U+0049  'I'
+        DB $00, $1c, $04, $04, $04, $84, $78, $00        ; $4a  U+004A  'J'
+        DB $00, $84, $88, $f0, $88, $84, $84, $00        ; $4b  U+004B  'K'
+        DB $00, $40, $40, $40, $40, $40, $7c, $00        ; $4c  U+004C  'L'
+        DB $00, $82, $c6, $aa, $92, $82, $82, $00        ; $4d  U+004D  'M'
+        DB $00, $84, $c4, $a4, $94, $8c, $84, $00        ; $4e  U+004E  'N'
+        DB $00, $78, $84, $84, $84, $84, $78, $00        ; $4f  U+004F  'O'
+        DB $00, $f8, $84, $84, $f8, $80, $80, $00        ; $50  U+0050  'P'
+        DB $00, $78, $84, $84, $84, $94, $78, $04        ; $51  U+0051  'Q'
+        DB $00, $f8, $84, $84, $f8, $88, $84, $00        ; $52  U+0052  'R'
+        DB $00, $7c, $80, $7c, $02, $82, $7c, $00        ; $53  U+0053  'S'
+        DB $00, $fe, $10, $10, $10, $10, $10, $00        ; $54  U+0054  'T'
+        DB $00, $84, $84, $84, $84, $84, $78, $00        ; $55  U+0055  'U'
+        DB $00, $82, $82, $44, $44, $28, $10, $00        ; $56  U+0056  'V'
+        DB $00, $82, $82, $82, $92, $aa, $44, $00        ; $57  U+0057  'W'
+        DB $00, $84, $48, $30, $30, $48, $84, $00        ; $58  U+0058  'X'
+        DB $00, $82, $44, $28, $10, $10, $10, $00        ; $59  U+0059  'Y'
+        DB $00, $fc, $08, $10, $20, $40, $fc, $00        ; $5a  U+005A  'Z'
+        DB $00, $1e, $10, $10, $10, $10, $1e, $00        ; $5b  U+005B  '['
+        DB $00, $80, $40, $20, $10, $08, $04, $00        ; $5c  U+005C  '\\'
+        DB $00, $f0, $10, $10, $10, $10, $f0, $00        ; $5d  U+005D  ']'
+        DB $00, $10, $28, $00, $00, $00, $00, $00        ; $5e  U+005E  '^'
+        DB $00, $00, $00, $00, $00, $00, $00, $fe        ; $5f  U+005F  '_'
+        DB $00, $20, $10, $00, $00, $00, $00, $00        ; $60  U+0060  '`'
+        DB $00, $00, $00, $74, $88, $98, $6c, $00        ; $61  U+0061  'a'
+        DB $00, $40, $40, $78, $44, $44, $b8, $00        ; $62  U+0062  'b'
+        DB $00, $00, $00, $3c, $40, $40, $3c, $00        ; $63  U+0063  'c'
+        DB $00, $04, $04, $3c, $44, $44, $3a, $00        ; $64  U+0064  'd'
+        DB $00, $00, $00, $38, $44, $7c, $20, $10        ; $65  U+0065  'e'
+        DB $00, $18, $24, $70, $20, $20, $20, $00        ; $66  U+0066  'f'
+        DB $00, $00, $00, $3a, $44, $3c, $04, $38        ; $67  U+0067  'g'
+        DB $00, $40, $40, $58, $64, $44, $44, $00        ; $68  U+0068  'h'
+        DB $00, $10, $00, $30, $10, $10, $18, $00        ; $69  U+0069  'i'
+        DB $00, $08, $00, $18, $08, $08, $08, $70        ; $6a  U+006A  'j'
+        DB $00, $40, $40, $48, $70, $48, $44, $00        ; $6b  U+006B  'k'
+        DB $00, $30, $10, $10, $10, $10, $18, $00        ; $6c  U+006C  'l'
+        DB $00, $00, $00, $ec, $92, $92, $82, $00        ; $6d  U+006D  'm'
+        DB $00, $00, $00, $b8, $44, $44, $44, $00        ; $6e  U+006E  'n'
+        DB $00, $00, $00, $38, $44, $44, $38, $00        ; $6f  U+006F  'o'
+        DB $00, $00, $00, $b8, $44, $78, $40, $40        ; $70  U+0070  'p'
+        DB $00, $00, $00, $3a, $44, $3c, $04, $04        ; $71  U+0071  'q'
+        DB $00, $00, $00, $58, $24, $20, $20, $00        ; $72  U+0072  'r'
+        DB $00, $00, $38, $40, $38, $04, $78, $00        ; $73  U+0073  's'
+        DB $00, $00, $20, $78, $20, $24, $18, $00        ; $74  U+0074  't'
+        DB $00, $00, $00, $44, $44, $44, $3a, $00        ; $75  U+0075  'u'
+        DB $00, $00, $00, $44, $44, $28, $10, $00        ; $76  U+0076  'v'
+        DB $00, $00, $00, $82, $92, $92, $6c, $00        ; $77  U+0077  'w'
+        DB $00, $00, $00, $6c, $10, $28, $44, $00        ; $78  U+0078  'x'
+        DB $00, $00, $00, $44, $44, $3c, $04, $38        ; $79  U+0079  'y'
+        DB $00, $00, $00, $7c, $18, $20, $7c, $00        ; $7a  U+007A  'z'
+        DB $00, $0c, $10, $60, $10, $10, $0c, $00        ; $7b  U+007B  '{'
+        DB $00, $10, $10, $10, $10, $10, $10, $00        ; $7c  U+007C  '|'
+        DB $00, $60, $10, $0c, $10, $10, $60, $00        ; $7d  U+007D  '}'
+        DB $00, $72, $8c, $00, $00, $00, $00, $00        ; $7e  U+007E  '~'

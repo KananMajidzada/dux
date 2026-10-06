@@ -55,6 +55,7 @@
 
 INCLUDE "common.tal"
 INCLUDE "lib/fontlib.tal"
+INCLUDE "lib/ascii.tal"
 
 @CLK.hour    = $c6       ; 0-23
 @CLK.minute  = $c7       ; 0-59
@@ -96,11 +97,13 @@ INCLUDE "lib/fontlib.tal"
 
 ; ------------------------------------------------------------------- glyphs
 ;
-; Indices into @font. Zero is the digit 0, so the ten digits are 0 to 9, the
-; twenty six letters are $0a to $23, and the marks follow.
-@CH.0      = $00
-@CH.9      = $09
-@CH.COLON  = $28
+; The table is indexed by character: the glyph for code c is at
+; @font + (c - $20) * 8, which @char below does by subtracting and then walking.
+; So a caller writes the character's own code and there is no font-specific
+; constant anywhere - the colon is $3a because a colon is $3a, not because this
+; font happens to keep it at index 36.
+@CH.DIGIT  = $30             ; so the digits are $30 to $39, and ten of them
+@CH.COLON  = $3a
 
 ; -------------------------------------------------------------------- draw
 ;
@@ -218,12 +221,16 @@ INCLUDE "lib/fontlib.tal"
         LDA2 $ZP.gx
         LDA2 $ZP.gy
         LDA2 $ZP.ten
+        LIT2 @CH.DIGIT               ; '0' plus the tens, so a character code
+        ADD2
         LDZ $ZP.gc
         JSR2 @char
 
         LDA2 $ZP.gx                   ; wherever the tens digit left the cursor
         LDA2 $ZP.gy
         LDA2 $ZP.un
+        LIT2 @CH.DIGIT
+        ADD2
         LDZ $ZP.gc
         JSR2 @char
 
@@ -231,28 +238,34 @@ INCLUDE "lib/fontlib.tal"
 
 ; -------------------------------------------------------------------- char
 ;
-; Stack: x short, y short, index short, colour byte. Seven in, none out.
+; Stack: x short, y short, character short, colour byte. Seven in, none out.
 ;
-; The glyph whose index it is, at that x and y, and then the cursor is one cell
-; further on. This is @num from fontlib with the cursor step @num does not have,
-; because nothing that uses @num lays a row of digits out.
+; The glyph for that character code, at that x and y, and then the cursor one
+; cell further on.
 ;
-; The index counts glyphs off @font rather than addressing into it, which is
-; @num's argument and it is a good one: a walk cannot land in the wrong place,
-; and computing a table's address has been wrong at least once on this machine.
-; A walk of ten steps is longer than the multiply it saves, which is the price,
-; and a clock draws six digits and two colons a frame.
+; The code becomes a glyph by subtracting the space and walking from @font,
+; which is the whole of the addressing: the table is in character order from
+; $20 up, so the offset is (code - $20) and there is no map to consult. The
+; $20 goes on FIRST because the operand pushed first is the one a subtraction
+; takes away. The other way round computes $20 - code, which is a large positive
+; number rather than a negative one, so the walk runs off the end of the table
+; and into the program's own code, drawing instructions as glyphs.
 ;
-; The operand pushed first is the one a comparison or a subtraction takes as
-; its left side, so GTH2 below asks "is the countdown above zero" and not "is
-; zero above the countdown". The zero goes on SECOND for that reason, and the
-; reverse order is false every time the countdown is still counting, which means
-; every digit would be drawn as a zero - a clock that reads 00:00:00 forever.
+; The walk is kept rather than replaced with a multiply by eight. It costs up to
+; $5e steps for the last character in the table against one MUL2, and a clock
+; that draws eight glyphs a frame cannot tell the difference. It is also the
+; reason to keep this table in character order, and the reason not to adopt a
+; 512 glyph font wholesale: that would be up to 511 steps a glyph, which is fine
+; for a clock and hopeless for a screenful of text.
 @char
         STA $ZP.gc
         STA2 $ZP.ci
         STA2 $ZP.gy
         STA2 $ZP.gx
+        LDA2 $ZP.ci
+        LIT2 $0020
+        SUB2                    ; the character's glyph: its code less the space
+        STA2 $ZP.ci
         LIT2 @font
         STA2 $ZP.gp
 
