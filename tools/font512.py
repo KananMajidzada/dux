@@ -33,15 +33,19 @@ Usage:
 
     # from a checkout of the upstream repo:
     git clone https://github.com/alexfru/512_8
-    tools/font512.py --emit ~/512_8/512_8_sans.txt > asm/lib/ascii.tal
+    tools/font512.py --emit ~/512_8/512_8_bold.txt > asm/lib/ascii.tal
 
 The font is public domain (Unlicense), so nothing is owed for using it and
-nothing has to be credited. Sans is used here rather than the bold the upstream
-author recommends, and it is worth saying what that costs: he describes sans as
-thin, with worse contrast, and at 8x8 it shows - the colon is two single pixels
-and the hyphen is five. Bold would be the safer pick for a clock. Both styles
-carry the same characters at the same indices, so switching is a change to the
-file name on the command line and nothing else.
+nothing has to be credited.
+
+The style comes from the file name, so moving between upstream's three is a
+change to the command line and nothing else: all three carry the same characters
+at the same indices and only the shapes differ. Bold is what this table uses and
+what upstream recommends - of the three it is the most legible, because of the
+thickness and the contrast, at the cost of being noticeably part-serif where the
+cell has no room for a serif. Upstream calls sans thin with poor contrast and
+serif the least legible of the three; at 8x8 the difference is not subtle, a
+sans colon is two single pixels and a sans full stop is one.
 """
 
 import os
@@ -174,7 +178,35 @@ def label(code, rows, names):
     return name
 
 
-def emit(glyphs, names):
+STYLES = {
+    'bold': ('bold, which upstream recommends as the most legible of the three '
+             'styles: the thickness and the contrast carry it, at the cost of '
+             'being noticeably part-serif where an eight pixel cell has no room '
+             'for a serif'),
+    'sans': ('sans, which upstream calls thin with poor contrast. At 8x8 that '
+             'is not subtle: the colon is two single pixels and the full stop is '
+             'one. Upstream recommends bold instead'),
+    'serif': ('serif, which upstream calls the least legible of the three, the '
+              'serifs themselves and their effect on the rest of the shape being '
+              'the reason. Upstream recommends bold instead'),
+}
+
+
+def style_of(path):
+    """'bold', 'sans' or 'serif', taken from the upstream file name.
+
+    Guessing beats hardcoding here because the file name is where the choice
+    already is: all three styles have the same characters at the same indices, so
+    changing style is meant to be changing the argument and not editing this.
+    """
+    name = os.path.basename(path).lower()
+    for style in STYLES:
+        if style in name:
+            return style
+    return 'unknown'
+
+
+def emit(glyphs, names, style):
     out = []
     w = out.append
     w('; ascii.tal - printable ASCII from the 512_8 font, as data.')
@@ -188,13 +220,11 @@ def emit(glyphs, names):
     w('; and the machine has 32256 bytes of code and data to spend, which is')
     w('; plenty but not unlimited.')
     w(';')
-    w('; From https://github.com/alexfru/512_8, sans. Public domain, Unlicense:')
-    w('; nothing is owed for using it. Upstream recommends bold as the most')
-    w('; legible of its three styles and warns that sans is thin with poor')
-    w('; contrast, which at 8x8 is visible - the colon is two single pixels and')
-    w('; the hyphen five. Worth knowing that the clock is set in this. Both styles')
-    w('; carry the same characters at the same indices, so changing style is')
-    w('; changing the file name on the generator command and nothing else.')
+    w('; From https://github.com/alexfru/512_8, ' + STYLES.get(style, style) + '.')
+    w('; Public domain, Unlicense: nothing is owed for using it and nothing has')
+    w('; to be credited. Upstream ships bold, sans and serif; they carry the same')
+    w('; characters at the same indices and differ only in the shapes, so the')
+    w('; style is chosen by which upstream file tools/font512.py was pointed at.')
     w(';')
     w('; THE INDEX IS THE CHARACTER, MINUS THE SPACE')
     w('; ----------------------------------------')
@@ -224,19 +254,19 @@ def main(argv):
     if '--help' in argv or '-h' in argv:
         print(__doc__)
         return 0
-    src = args[0] if args else '512_8_sans.txt'
+    src = args[0] if args else '512_8_bold.txt'
     try:
         glyphs = read_glyphs(src)
         names = read_codepoints(src)
     except OSError:
         print('font512: cannot read %s\n'
               '         clone https://github.com/alexfru/512_8 and point at\n'
-              '         512_8_sans.txt inside it; the .tab beside it is\n'
+              '         512_8_bold.txt inside it; the .tab beside it is\n'
               '         needed too, for the glyph names' % src, file=sys.stderr)
         return 1
 
     if '--emit' in argv:
-        sys.stdout.write(emit(glyphs, names))
+        sys.stdout.write(emit(glyphs, names, style_of(src)))
     else:
         preview(glyphs, names)
     return 0
